@@ -8,6 +8,14 @@ const REDACTED = "[REDACTED]";
 const PATTERNS: Array<[RegExp, string | ((...groups: string[]) => string)]> = [
 	// PEM private keys and certificates with key material.
 	[/-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|$)/g, `-----BEGIN PRIVATE KEY----- ${REDACTED}`],
+	// Orphaned PEM body whose BEGIN line fell outside a tail window: the whole
+	// run of base64-only lines ending at an END line, including the short last
+	// line the long-run fallback below would miss. The lookbehind starts the
+	// match only at the first line of a run, keeping the scan linear.
+	[
+		/(?<!^[ \t]*[A-Za-z0-9+/=]+[ \t]*\r?\n)^(?:[ \t]*[A-Za-z0-9+/=]+[ \t]*\r?\n)*[ \t]*-----END [A-Z0-9 ]*PRIVATE KEY-----/gm,
+		`${REDACTED} -----END PRIVATE KEY-----`,
+	],
 	// Authorization headers and bearer tokens.
 	[/\b(authorization\s*[:=]\s*)(?:bearer|basic|token)?\s*[^\s"',;]+/gi, (_m, prefix) => `${prefix}${REDACTED}`],
 	[/\bbearer\s+[A-Za-z0-9._~+/=-]{8,}/gi, `Bearer ${REDACTED}`],

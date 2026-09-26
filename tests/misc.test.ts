@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { generateKeyPairSync } from "node:crypto";
 import { backoffDelay, TRANSPORT_BACKOFF } from "../lib/backoff.ts";
 import { redact } from "../lib/redact.ts";
 import { footerText } from "../lib/status.ts";
@@ -126,4 +127,42 @@ test("redact hides multiline PEM keys and orphaned PEM body lines", () => {
 	assert.equal(redact(`commit ${sha}`), `commit ${sha}`);
 	const lines = formatNotice(notice({ lines: whole.split("\n") }));
 	assert.ok(!lines.includes("MIIEowIBAAKCAQEAu1SU") && !lines.includes("VTLw7onLRnrq0"), lines);
+});
+
+test("redact hides every body line of generated keys, whole or with BEGIN cut off", () => {
+	const keys = {
+		rsa: generateKeyPairSync("rsa", { modulusLength: 2048 }).privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
+		rsaPkcs1: generateKeyPairSync("rsa", { modulusLength: 1024 }).privateKey.export({ type: "pkcs1", format: "pem" }).toString(),
+		ec: generateKeyPairSync("ec", { namedCurve: "P-256" }).privateKey.export({ type: "sec1", format: "pem" }).toString(),
+	};
+	for (const [name, pem] of Object.entries(keys)) {
+		const lines = pem.trimEnd().split("\n");
+		const body = lines.slice(1, -1);
+		const texts = {
+			whole: ["building", ...lines, "done"].join("\n"),
+			noBegin: [...lines.slice(1), "done"].join("\n"),
+			cutFirstBody: [...lines.slice(2), "done"].join("\n"),
+			lastBodyOnly: ["building", lines.at(-2), lines.at(-1), "done"].join("\n"),
+		};
+		for (const [shape, text] of Object.entries(texts)) {
+			const out = redact(text);
+			for (const line of body) assert.ok(!out.includes(line), `${name}/${shape} leaked ${line}: ${out}`);
+			assert.match(out, /done$/, `${name}/${shape}`);
+		}
+	}
+	const openssh = ["b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW", "QyNTUxOQAAACAb", "-----END OPENSSH PRIVATE KEY-----"].join("\n");
+	assert.ok(!redact(openssh).includes("QyNTUxOQAAACAb"));
+});
+
+test("redact leaves ordinary build output unchanged", () => {
+	const output = [
+		"> pi-bg@0.1.0 build /home/alex/src/pi-bg",
+		"commit 0b0073b2f1c9d8e7a6b5c4d3e2f1a0b9c8d7e6f5",
+		"src/index.ts",
+		"OK",
+		"compiled 12 files in 3.4s",
+		"-----END-OF-BUILD-----",
+		"ok 42 tests passed",
+	].join("\n");
+	assert.equal(redact(output), output);
 });
