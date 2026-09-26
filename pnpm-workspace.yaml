@@ -1,0 +1,19 @@
+# Dev-only dependencies (types and typecheck); pi-bg has no runtime deps.
+
+# Reject packages published less than 3 days ago (supply-chain defense).
+minimumReleaseAge: 4320
+minimumReleaseAgeExclude:
+  - '@earendil-works/pi-coding-agent@0.87.1'
+  - '@earendil-works/chord@0.87.1'
+  - '@earendil-works/pi-agent-core@0.87.1'
+  - '@earendil-works/pi-ai@0.87.1'
+  - '@earendil-works/pi-tui@0.87.1'
+  - '@earendil-works/pi-telemetry@0.87.1'
+trustPolicy: no-downgrade
+blockExoticSubdeps: true
+
+# No install scripts are needed for type information.
+allowBuilds:
+  '@google/genai': false
+  esbuild: false
+  protobufjs: false
