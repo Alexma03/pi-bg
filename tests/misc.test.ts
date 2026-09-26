@@ -112,3 +112,18 @@ test("footer text combines tasks and bridge state", () => {
 	const pending = { ...waiting, phase: "pending" as const, pendingSince: 0 };
 	assert.equal(footerText(1, pending, 125_000), "⏵ 1 bg · orca ◆ ack pending 2m05s run_8da5");
 });
+
+test("redact hides multiline PEM keys and orphaned PEM body lines", () => {
+	const body = ["MIIEowIBAAKCAQEAu1SU1LfVLPHCozMxH2Mo4lgOEePzNm0tRgeLezV6ffAt0gun", "VTLw7onLRnrq0/IzW7yWR7QkrmBL7jTKEn5u+qKhbwKfBstIs+bMY2Zkp18gnTxK"];
+	const whole = ["before", "-----BEGIN RSA PRIVATE KEY-----", ...body, "-----END RSA PRIVATE KEY-----", "after"].join("\n");
+	const cut = [...body, "-----END RSA PRIVATE KEY-----", "after"].join("\n");
+	for (const text of [whole, cut]) {
+		const out = redact(text);
+		assert.ok(!out.includes("MIIEowIBAAKCAQEAu1SU") && !out.includes("VTLw7onLRnrq0"), out);
+		assert.match(out, /after$/);
+	}
+	const sha = "0b0073b2f1c9d8e7a6b5c4d3e2f1a0b9c8d7e6f5";
+	assert.equal(redact(`commit ${sha}`), `commit ${sha}`);
+	const lines = formatNotice(notice({ lines: whole.split("\n") }));
+	assert.ok(!lines.includes("MIIEowIBAAKCAQEAu1SU") && !lines.includes("VTLw7onLRnrq0"), lines);
+});

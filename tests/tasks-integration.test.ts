@@ -4,7 +4,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { statSync } from "node:fs";
-import { mkdtemp, readFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { TaskManager } from "../lib/tasks/manager.ts";
@@ -108,6 +108,61 @@ test("shutdown kills every running task", async () => {
 	await manager.shutdown(300);
 	await until(() => !alive(a.pid!) && !alive(b.pid!));
 	assert.equal(notices.length, 0);
+});
+
+test("a backgrounded child does not outlive its task", async () => {
+	const { manager, notices, dir } = await makeManager();
+	const pidFile = join(dir, "orphan.pid");
+	await manager.start({ command: `sleep 300 >/dev/null 2>&1 & echo $! > ${pidFile}; exit 4`, cwd: tmpdir() });
+	await until(() => notices.length === 1);
+	assert.equal(notices[0].exitCode, 4);
+	const orphan = Number((await readFile(pidFile, "utf8")).trim());
+	await until(() => !alive(orphan), 3_000);
+});
+
+test("a TERM-ignoring leftover is killed after the task exits", async () => {
+	const { manager, notices, dir } = await makeManager();
+	const pidFile = join(dir, "stubborn.pid");
+	// The inner shell records its pid only after installing the trap; the task waits for it.
+	await manager.start({ command: `bash -c "trap '' TERM; echo \\$\\$ > ${pidFile}; exec sleep 300" >/dev/null 2>&1 & until [ -s ${pidFile} ]; do sleep 0.05; done`, cwd: tmpdir() });
+	await until(() => notices.length === 1);
+	assert.equal(notices[0].exitCode, 0);
+	const stubborn = Number((await readFile(pidFile, "utf8")).trim());
+	await until(() => !alive(stubborn), 4_000);
+});
+
+test("tail and exit notice redact a multiline PEM key", async () => {
+	const { manager, notices } = await makeManager();
+	const key = "printf '%s\\n' '-----BEGIN PRIVATE KEY-----' MIIEowIBAAKCAQEAu1SU1LfVLPHCozMxH2Mo4lgOEePzNm0tRgeLezV6ffAt0gun '-----END PRIVATE KEY-----' done";
+	const task = await manager.start({ command: key, cwd: tmpdir() });
+	await until(() => notices.length === 1);
+	assert.ok(!notices[0].lines.join("\n").includes("MIIEow"), notices[0].lines.join("\n"));
+	const full = await manager.tail(task.id);
+	assert.ok(!full.includes("MIIEow"), full);
+	assert.match(full, /done$/);
+	// A small in-memory tail cuts the BEGIN line: the body line is still hidden.
+	const cutNotices: TaskNotice[] = [];
+	const small = new TaskManager({ logDir: await mkdtemp(join(tmpdir(), "pi-bg-test-")), now: Date.now, onNotice: (n) => cutNotices.push(n), tailChars: 100 });
+	await small.start({ command: key, cwd: tmpdir() });
+	await until(() => cutNotices.length === 1);
+	const cut = cutNotices[0].lines.join("\n");
+	assert.ok(!cut.includes("BEGIN") && !cut.includes("MIIEow"), cut);
+	assert.match(cut, /done$/);
+});
+
+test("an unopenable log file is reported instead of crashing", async () => {
+	const notices: TaskNotice[] = [];
+	const dir = await mkdtemp(join(tmpdir(), "pi-bg-test-"));
+	const now = () => 1_700_000_000_000;
+	const stamp = new Date(now()).toISOString().replace(/[:.]/g, "-").slice(0, 19);
+	await mkdir(join(dir, `${stamp}-bg1.log`));
+	const manager = new TaskManager({ logDir: dir, now, onNotice: (n) => notices.push(n), killGraceMs: 500 });
+	const task = await manager.start({ command: "echo still-here; sleep 0.3", cwd: tmpdir() });
+	await until(() => notices.length === 1);
+	assert.match(manager.get(task.id)?.logError ?? "", /EISDIR|directory/i);
+	assert.match(notices[0].note ?? "", /log file could not be written/);
+	assert.deepEqual(notices[0].lines, ["still-here"]);
+	assert.match(await manager.tail(task.id), /still-here/);
 });
 
 test("the watchdog kills the group when the parent process dies", async () => {

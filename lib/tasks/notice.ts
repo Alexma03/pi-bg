@@ -52,7 +52,8 @@ export function formatNotice(n: TaskNotice, maxChars = 2_400): string {
 	if (n.note) out.push(`  ${n.note}`);
 	if (n.lines.length) {
 		out.push(n.kind === "match" ? "  matching lines:" : `  last ${n.lines.length} line${n.lines.length === 1 ? "" : "s"}:`);
-		for (const line of n.lines) out.push(`  │ ${clip(clean(line), 400)}`);
+		// Redact the joined lines so multiline secrets (PEM blocks) still match.
+		for (const line of clean(n.lines.join("\n")).split("\n")) out.push(`  │ ${clip(line, 400)}`);
 	}
 	out.push(`  log: ${n.logPath}${n.stillRunning ? ` · bg_tail id=${n.id} · bg_cancel id=${n.id}` : ""}`);
 	return clip(out.join("\n"), maxChars);

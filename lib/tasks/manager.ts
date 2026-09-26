@@ -43,6 +43,8 @@ export interface TaskSnapshot {
 	bytes: number;
 	watch: WatchSpec | undefined;
 	watchEvents: number;
+	/** Set when the log file could not be opened or written. */
+	logError?: string;
 }
 
 export interface ManagerDeps {
@@ -108,6 +110,14 @@ export class TaskManager {
 		const id = `bg${++this.counter}`;
 		const logPath = join(this.deps.logDir, `${this.stamp}-${id}.log`);
 		const log = createWriteStream(logPath, { flags: "w", mode: 0o600 });
+		// Without a listener a failed open or write would crash Pi.
+		log.on("error", (error) => {
+			const task = this.tasks.get(id);
+			if (task && !task.snap.logError) {
+				task.snap.logError = clip(error.message, 200);
+				this.changed();
+			}
+		});
 		const startedAt = this.deps.now();
 		log.write(`# pi-bg ${id} · started ${new Date(startedAt).toISOString()} · cwd ${spec.cwd}\n# $ ${spec.command}\n`);
 		const child = spawnShell(spec.command, { cwd: spec.cwd, env: { ...(this.deps.env ?? process.env), PI_BG_TASK_ID: id } });
@@ -169,7 +179,9 @@ export class TaskManager {
 	private onOutput(task: Task, chunk: string): void {
 		task.snap.bytes += Buffer.byteLength(chunk);
 		const cap = this.deps.logMaxBytes ?? 64 * 1024 * 1024;
-		if (task.snap.bytes <= cap) task.log.write(chunk);
+		if (task.snap.logError) {
+			// The stream is dead; keep the in-memory tail only.
+		} else if (task.snap.bytes <= cap) task.log.write(chunk);
 		else if (!task.logCapped) {
 			task.logCapped = true;
 			task.log.write(`\n[pi-bg: log reached ${cap} bytes; further output is not written]\n`);
@@ -246,8 +258,13 @@ export class TaskManager {
 			task.snap.status = task.timedOut ? "timeout" : task.quiet ? "cancelled" : "exited";
 		}
 		if (!task.quiet) {
-			const lines = lastLines(task.tail, this.deps.noticeLines ?? 15);
-			const note = task.watcher && task.watcher.mode === "until" && !task.watcher.matched ? `watch pattern /${task.snap.watch?.pattern}/ never matched.` : undefined;
+			// Redact before splitting so multiline secrets (PEM blocks) match.
+			const lines = lastLines(redact(sanitizeTerminal(task.tail)), this.deps.noticeLines ?? 15);
+			const notes = [
+				task.watcher && task.watcher.mode === "until" && !task.watcher.matched ? `watch pattern /${task.snap.watch?.pattern}/ never matched.` : "",
+				task.snap.logError ? `log file could not be written (${task.snap.logError}); output shown is from memory only.` : "",
+			].filter(Boolean);
+			const note = notes.length ? notes.join(" ") : undefined;
 			this.emit(task, task.timedOut ? "timeout" : "exit", lines, { stillRunning: false, ...(note ? { note } : {}) });
 		}
 		this.changed();
@@ -281,14 +298,14 @@ export class TaskManager {
 		const task = this.tasks.get(id);
 		if (!task) throw new Error(`Unknown task ${id}`);
 		const wanted = Math.min(400, Math.max(1, options.lines ?? 40));
-		const text = await readTailBytes(task.snap.logPath, 256 * 1024);
-		let lines = text.replace(/\n$/, "").split("\n");
+		const text = task.snap.logError ? task.tail : await readTailBytes(task.snap.logPath, 256 * 1024);
+		// Redact the whole text before splitting so multiline secrets (PEM blocks) match.
+		let lines = redact(sanitizeTerminal(text)).replace(/\n$/, "").split("\n");
 		if (options.grep) {
 			const regex = new RegExp(options.grep, "i");
 			lines = lines.filter((line) => regex.test(line));
 		}
-		const picked = lines.slice(-wanted).map((line) => redact(sanitizeTerminal(line)));
-		return clip(picked.join("\n"), 20_000);
+		return clip(lines.slice(-wanted).join("\n"), 20_000);
 	}
 
 	/** Kill every running task: TERM, wait up to graceMs, then KILL. */

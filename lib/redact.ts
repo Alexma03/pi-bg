@@ -28,6 +28,10 @@ const PATTERNS: Array<[RegExp, string | ((...groups: string[]) => string)]> = [
 		/\b([A-Za-z0-9_.-]*(?:password|passwd|secret|token|api[_-]?key|apikey|access[_-]?key|private[_-]?key|client[_-]?secret|auth)[A-Za-z0-9_.-]*)(\s*[:=]\s*|"\s*:\s*")("?)([^\s"',;&]{4,})/gi,
 		(_m, key, sep, quote) => `${key}${sep}${quote}${REDACTED}`,
 	],
+	// Fallback: long base64-looking runs, e.g. PEM body lines whose BEGIN line
+	// fell outside a tail window. Requiring upper, lower and a digit spares hex
+	// digests (git SHAs) and plain words or paths.
+	[/(?<![A-Za-z0-9+/=])(?=[A-Za-z0-9+/=]*[A-Z])(?=[A-Za-z0-9+/=]*[a-z])(?=[A-Za-z0-9+/=]*[0-9])[A-Za-z0-9+/=]{40,}/g, REDACTED],
 ];
 
 export function redact(text: string): string {

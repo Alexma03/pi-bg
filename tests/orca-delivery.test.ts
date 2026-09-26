@@ -56,3 +56,16 @@ test("formatDelivery strips terminal escape sequences from bodies", () => {
 	assert.match(text, /red done/);
 	assert.doesNotMatch(text, /\u001b/);
 });
+
+const ACK = /orca_ack with deliveryId "delivery_9"/;
+
+test("formatDelivery keeps every header and the ack for a full batch of long bodies", () => {
+	for (const count of [6, 50]) {
+		const messages = Array.from({ length: count }, (_, i) => msg(`m${i}`, i % 5 === 0 ? "question" : "worker_done", { body: "b".repeat(2_000), payload: '{"outcome":"succeeded"}' }));
+		const text = formatDelivery(delivery(messages), { rawPath: "/tmp/raw.json" });
+		for (let i = 0; i < count; i++) assert.match(text, new RegExp(`${i + 1}\\. \\w+ from term_worker · id m${i}\\n   Subject: `), `missing m${i} of ${count}`);
+		assert.match(text, ACK);
+		assert.match(text, /\nRaw batch: \/tmp\/raw.json$/);
+		assert.ok(text.length <= 10_000, `${count} messages: ${text.length} chars`);
+	}
+});

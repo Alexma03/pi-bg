@@ -7,6 +7,11 @@
 // within ~2 s. A clean shutdown kills the group directly with killGroup().
 // This matters most for the Orca waiter: an orphaned `check --wait` would keep
 // holding the Run's exclusive waiter slot.
+//
+// When the wrapped command exits, the wrapper also TERMs whatever it left in
+// the group (e.g. `cmd &` with redirected output) and a detached reaper KILLs
+// leftovers that ignore TERM, so nothing outlives its task (user decision).
+// The wrapper ignores that TERM itself and exits with the command's status.
 
 import { spawn, type ChildProcess } from "node:child_process";
 
@@ -17,6 +22,9 @@ const WRAPPER = [
 	'"$@"',
 	"status=$?",
 	'kill "$watchdog" 2>/dev/null',
+	"trap '' TERM",
+	"kill -TERM 0 2>/dev/null",
+	'( sleep 1; kill -KILL 0 2>/dev/null ) </dev/null >/dev/null 2>&1 &',
 	'exit "$status"',
 ].join("\n");
 
