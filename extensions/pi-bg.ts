@@ -182,10 +182,11 @@ export default function piBg(pi: ExtensionAPI) {
 
 	// ---- bash guard and Run-binding detection ----------------------------
 
+	const bridgeOwnsMailbox = (): boolean => Boolean(bridge && bridge.state.phase !== "off" && bridge.state.phase !== "fenced");
+
 	pi.on("tool_call", (event) => {
-		if (event.toolName !== "bash" || !bridge) return;
-		const phase = bridge.state.phase;
-		if (phase === "off" || phase === "fenced") return;
+		// bg_run is guarded in its own execute(); bash is the only other shell here.
+		if (event.toolName !== "bash" || !bridgeOwnsMailbox()) return;
 		const command = String((event.input as { command?: unknown }).command ?? "");
 		if (classifyOrcaCommand(command).includes("consuming-check")) return { block: true, reason: BLOCK_REASON };
 		return;
@@ -258,6 +259,7 @@ export default function piBg(pi: ExtensionAPI) {
 		),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
 			ctxRef = ctx;
+			if (bridgeOwnsMailbox() && classifyOrcaCommand(params.command).includes("consuming-check")) throw new Error(BLOCK_REASON);
 			const timeoutS = params.timeout_s ?? (params.watch ? WATCH_DEFAULT_TIMEOUT_S : 0);
 			const task = await need().start({
 				command: params.command,
