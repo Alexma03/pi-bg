@@ -17,6 +17,15 @@ test("consuming checks are detected in any shape", () => {
 		"python3 ~/.local/bin/orca-wait",
 		"bash -lc 'orca-wait --timeout-min 5'",
 		"X=1 orca-wait",
+		// Wrapper options that take a value must not hide the command.
+		"timeout -s KILL 60 orca-wait",
+		"timeout --kill-after 5 60 orca-wait",
+		"nice -n 5 orca-wait",
+		"sudo -u alex orca-wait",
+		"env -u HOME orca-wait",
+		"env -S 'orca-wait --timeout-min 5'",
+		"stdbuf -o L orca-wait",
+		"time -f %e orca-wait",
 	]) {
 		assert.ok(classifyOrcaCommand(cmd).includes("consuming-check"), cmd);
 	}

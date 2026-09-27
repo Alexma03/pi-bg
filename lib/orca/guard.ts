@@ -12,7 +12,7 @@ const SEPARATORS = /\|\||&&|[;|&\n]|\$\(|`/;
 /**
  * Drop text the shell never runs as a command: heredoc bodies and quoted
  * strings (a script or test that merely mentions `orca orchestration check`).
- * A quoted string after `-c` or `eval` is still code, so it is kept.
+ * A quoted string after `-c` (`bash -lc`), `env -S` or `eval` is still code, so it is kept.
  */
 export function stripInert(command: string): string {
 	const out: string[] = [];
@@ -28,8 +28,8 @@ export function stripInert(command: string): string {
 	return out
 		.join("\n")
 		.replace(/(^|[^\\])(['"])((?:\\.|(?!\2)[^\\])*)\2/g, (whole, before: string, quote: string, body: string, offset: number, all: string) => {
-			const lead = all.slice(Math.max(0, offset - 8), offset + before.length);
-			return /(^|\s)(-[a-z]*c|eval)\s*$/.test(lead) || !/\s/.test(body) ? whole : `${before}${quote}${quote}`;
+			const lead = all.slice(Math.max(0, offset - 16), offset + before.length);
+			return /(^|\s)(-[a-z]*c|-S|--split-string|eval)\s*$/.test(lead) || !/\s/.test(body) ? whole : `${before}${quote}${quote}`;
 		});
 }
 
@@ -40,28 +40,27 @@ function segments(command: string): string[] {
 		.filter(Boolean);
 }
 
-// Words that run the command after them (their own options are skipped).
-const WRAPPERS = new Set(["env", "command", "exec", "nohup", "time", "timeout", "nice", "setsid", "stdbuf", "sudo", "python", "python3", "bash", "sh", "zsh", "fish"]);
+// Words that run the command after them.
+const WRAPPERS = new Set(["env", "command", "exec", "nohup", "time", "timeout", "nice", "setsid", "stdbuf", "sudo", "doas", "python", "python3", "bash", "sh", "zsh", "fish"]);
 
-/** True when a segment runs orca-wait itself, not a command that only looks at it. */
+/**
+ * True when a segment runs orca-wait itself, not a command that only looks
+ * at it (`which`, `cat`, `head`…). Behind a wrapper it fails closed: wrapper
+ * options can take values (`timeout -s KILL 60`, `sudo -u x`, `env -S '…'`),
+ * so any orca-wait after one counts.
+ */
 function runsOrcaWait(segment: string): boolean {
 	const tokens = segment.split(/\s+/).map((t) => t.replace(/^["']|["']$/g, "")).filter(Boolean);
+	const isOrcaWait = (t: string) => (t.split("/").pop() ?? "") === "orca-wait";
 	let i = 0;
-	while (i < tokens.length) {
-		const t = tokens[i];
-		const base = t.split("/").pop() ?? "";
-		if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(t) || t.startsWith("-")) {
-			// `command -v` / `-V` only locate the program.
-			if (tokens[i - 1] === "command" && /^-[vV]$/.test(t)) return false;
-			i++;
-		} else if (WRAPPERS.has(base)) {
-			i++;
-			if (base === "timeout" && /^\d/.test(tokens[i] ?? "")) i++;
-		} else {
-			return base === "orca-wait";
-		}
-	}
-	return false;
+	while (i < tokens.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[i])) i++;
+	const first = tokens[i];
+	if (first === undefined) return false;
+	if (isOrcaWait(first)) return true;
+	if (!WRAPPERS.has(first.split("/").pop() ?? "")) return false;
+	// `command -v` / `-V` only locate the program.
+	if (first === "command" && /^-[vV]$/.test(tokens[i + 1] ?? "")) return false;
+	return tokens.slice(i + 1).some(isOrcaWait);
 }
 
 /** True when a segment invokes the orca CLI (bare, via path, or via env). */

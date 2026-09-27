@@ -45,6 +45,9 @@ test("Pi's default TUI: the editor rules, cwd, token stats and status segments a
 	const working = [" $ sleep 90; echo fin-largo (timeout 180s)", " Elapsed 11.0s", "── ⠦ Working ──────────────────────", RULE_LINE, " escribe algo", RULE_LINE, "/tmp/pi-bg-lab", "↑10k ↓129 R9.7k CH95.9% $0.001 (sub) 1.5%/700k (auto)   (openai-codex) gpt-6-luna • high", "⏵ 1 tarea"];
 	assert.equal(lastActivity(working), "$ sleep 90; echo fin-largo");
 	assert.equal(lastActivity(footer), undefined);
+	// Two rules followed by flush-left lines are not a footer without Pi's context usage line.
+	const gentle = [" Resumen:", RULE_LINE, " sección", RULE_LINE, "$ pnpm test", "read ~/x/README.md"];
+	assert.equal(lastActivity(gentle), "read ~/x/README.md");
 });
 
 test("falls back to the last line the agent wrote; nothing for pure chrome", () => {

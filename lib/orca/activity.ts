@@ -15,6 +15,8 @@ function isChrome(line: string): boolean {
 	return !line.trim() || BOX.test(line) || RULE.test(line) || CHROME.some((re) => re.test(line));
 }
 
+const PI_CONTEXT_USAGE = /\d+(\.\d+)?%\/\d+(\.\d+)?[kM]\b/;
+
 /**
  * Pi's default TUI ends with the editor between two full-width rules, then a
  * footer (cwd, token stats, status segments) written flush left, while the
@@ -31,6 +33,8 @@ function withoutPiFooter(tail: string[]): string[] {
 	if (last < 0) return tail;
 	const footer = tail.slice(last + 1).filter((l) => l.trim());
 	if (footer.length > 6 || footer.some((l) => /^\s/.test(l) || BOX.test(l))) return tail;
+	// Pi's footer always has the context usage ("2.4%/700k"); anything else is output.
+	if (!footer.some((l) => PI_CONTEXT_USAGE.test(l))) return tail;
 	for (let i = last - 1; i >= 0 && last - i <= 12; i--) {
 		if (RULE.test(tail[i]) && tail[i].trim()) return tail.slice(0, i);
 	}
