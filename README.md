@@ -75,6 +75,7 @@ The footer shows `⏵ 2 tareas` for tasks and a separate Orca segment. The Orca 
 While a Run is bound, pi-bg polls `worker-list --run` and `task-list --run` every 30 s. These calls are read-only, use explicit paging, and never touch the mailbox. pi-bg then sends an **Orca fleet** message on these transitions:
 
 - **stalled**: the worker is in progress but its activity has been `done` or `idle` for 3 min, or its status is stale, and it has not sent `worker_done`;
+- **no change**: the worker reports working, but what it is doing (read every 10 s from its terminal, running clocks ignored) has not changed for 10 min. Waiting on its own background task does not count;
 - **blocked**: an interactive prompt has been open in its terminal for more than 1 min;
 - **exited**: the process exited without `worker_done`;
 - **attention**: Orca reports input, approval, failure or interruption;
@@ -84,7 +85,7 @@ While a Run is bound, pi-bg polls `worker-list --run` and `task-list --run` ever
 
 Notices are coalesced over 5 s. At most 4 notices per 10 min start a turn; the rest wait for the next turn. Terminals taken over by a human are not reported as stalled or as closure debt. **The model decides what to do; pi-bg never nudges workers.**
 
-- `orca_workers {all?, refresh?}` shows the fleet table.
+- `orca_workers {all?, refresh?}` shows the fleet table: outcome, activity, agent and model, time since dispatch, and a `now:` line with what each open worker is doing and how long that has been unchanged.
 - `orca_watch {dispatchId, on?, note?}` adds events (`settled`, `any`) plus a note that comes back verbatim in the notice. Notes survive `/reload`.
 
 While a `bg_run` task runs, pi-bg emits `subagent:async-started` and `subagent:async-complete` on `pi.events`. Orca's Pi status extension then keeps the pane "working". A worker waiting on a gate is therefore not mistaken for a stalled one, and the Orca UI shows it as busy.

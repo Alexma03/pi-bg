@@ -45,3 +45,25 @@ export function lastActivity(tail: string[]): string | undefined {
 	const last = lines[lines.length - 1];
 	return last ? tidy(last) : undefined;
 }
+
+/** Activity text without running clocks, so a ticking timer is not a change. */
+export function activityKey(text: string): string {
+	return text.replace(/\b\d+h\d+m\b|\b\d+m\d+s\b|\b\d+(\.\d+)?s\b|\b\d+m\b/g, "#").trim();
+}
+
+/** The worker waits on one of its own background tasks: quiet is expected. */
+export function waitingOnBackground(text: string): boolean {
+	return text.startsWith("⏵ ");
+}
+
+export interface ActivitySeen {
+	text: string;
+	/** When the activity (without clocks) last changed, ms epoch. */
+	since: number;
+}
+
+/** Fold a new reading into the previous one; `since` moves only on a real change. */
+export function nextActivity(prev: ActivitySeen | undefined, text: string, now: number): ActivitySeen {
+	if (prev && activityKey(prev.text) === activityKey(text)) return { text, since: prev.since };
+	return { text, since: now };
+}

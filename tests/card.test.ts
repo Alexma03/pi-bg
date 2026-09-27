@@ -78,7 +78,7 @@ test("orca card names the Run by objective and shows each agent: task, state, ti
 		["a", { agent: "pi", model: "", effort: "", startedAt: 0 }],
 		["b", { agent: "codex", model: "gpt-6-sol", effort: "high", startedAt: 60_000 }],
 	]);
-	const activity = new Map([["a", "$ pnpm test"], ["b", "⏵ bg1 espera 3 min · 1m30s"]]);
+	const activity = new Map([["a", { text: "$ pnpm test", since: 0 }], ["b", { text: "⏵ bg1 espera 3 min · 1m30s", since: 0 }]]);
 	const card = buildOrcaCard({ now: 5 * 60_000, orca, fleet, objective: "Lab visual", details, activity, defaultModel: (agent) => (agent === "pi" ? "claude-opus-5-5" : undefined) });
 	assert.ok(card);
 	assert.equal(card.title, "Orca · Lab visual · 2 agentes");
@@ -122,6 +122,10 @@ test("orca card stays while a settled agent still has to be released", () => {
 test("worker states in plain words", () => {
 	const at = (extra: Partial<WorkerRow>, since = 0, now = 60_000) => workerLook(worker("w", extra), since, now);
 	assert.equal(at({}).state, "trabajando");
+	// Working with the same activity for 10 min: "sin cambios"; waiting on its own bg task is fine.
+	assert.equal(workerLook(worker("w"), 0, 11 * 60_000, undefined, { text: "$ pnpm test", since: 0 }).state, "sin cambios 11m00s");
+	assert.equal(workerLook(worker("w"), 0, 11 * 60_000, undefined, { text: "⏵ bg1 build · 11m", since: 0 }).state, "trabajando");
+	assert.equal(workerLook(worker("w"), 0, 5 * 60_000, undefined, { text: "$ pnpm test", since: 0 }).state, "trabajando");
 	assert.equal(at({ activity: "idle" }).state, "esperando");
 	assert.equal(at({ activity: "unknown" }).state, "arrancando");
 	assert.equal(at({ activity: "blocked" }).state, "esperando una respuesta en su terminal");

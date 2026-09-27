@@ -4,10 +4,10 @@
 
 import { extractJson, type CliCapture } from "./cli.ts";
 import { runOrcaCli } from "./exec.ts";
-import { lastActivity } from "./activity.ts";
+import { lastActivity, nextActivity, type ActivitySeen } from "./activity.ts";
 import { redact } from "../redact.ts";
 import { clip, sanitizeTerminal } from "../text.ts";
-import { addWatch, isInProgress, DEFAULT_FLEET_CONFIG, initialFleet, seedSeen, parseTasks, parseWorkerPage, parseWorkerShow, updateFleet, type WorkerDetail, type FleetConfig, type FleetEvent, type FleetState, type TaskRow, type Watch, type WorkerRow } from "./fleet.ts";
+import { addWatch, isInProgress, quietEvents, DEFAULT_FLEET_CONFIG, initialFleet, seedSeen, parseTasks, parseWorkerPage, parseWorkerShow, updateFleet, type WorkerDetail, type FleetConfig, type FleetEvent, type FleetState, type TaskRow, type Watch, type WorkerRow } from "./fleet.ts";
 
 export interface FleetDeps {
 	orcaBin: string;
@@ -43,8 +43,8 @@ export class FleetWatch {
 	objective = "";
 	/** Agent, model and start time per dispatch; immutable, so read once. */
 	readonly details = new Map<string, WorkerDetail>();
-	/** Latest activity line per open dispatch, from its terminal tail (sanitized, redacted). */
-	readonly activity = new Map<string, string>();
+	/** Latest activity per open dispatch, from its terminal tail (sanitized, redacted), and since when it is unchanged. */
+	readonly activity = new Map<string, ActivitySeen>();
 	private activityTimer: ReturnType<typeof setInterval> | undefined;
 	private readingActivity = false;
 	private timer: ReturnType<typeof setTimeout> | undefined;
@@ -184,12 +184,16 @@ export class FleetWatch {
 				if (!tail) continue;
 				const line = lastActivity(tail);
 				const text = line ? clip(redact(line), 200) : "";
-				if (text && this.activity.get(t.row.dispatchId) !== text) {
-					this.activity.set(t.row.dispatchId, text);
-					changed = true;
-				}
+				if (!text) continue;
+				const prev = this.activity.get(t.row.dispatchId);
+				const next = nextActivity(prev, text, this.deps.now());
+				if (prev?.text !== next.text) changed = true;
+				this.activity.set(t.row.dispatchId, next);
 			}
-			if (changed) this.deps.onChange();
+			if (this.runId !== runId || this.disposed) return;
+			const quiet = quietEvents(this.state, this.activity, this.deps.now(), this.deps.config ?? DEFAULT_FLEET_CONFIG);
+			if (quiet.length) this.deps.onEvents(quiet, this.state, runId);
+			if (changed || quiet.length) this.deps.onChange();
 		} finally {
 			this.readingActivity = false;
 		}

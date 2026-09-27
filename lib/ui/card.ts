@@ -7,7 +7,8 @@
 
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { OrcaState } from "../orca/machine.ts";
-import { isInProgress, summarize, type FleetState, type WorkerDetail, type WorkerRow } from "../orca/fleet.ts";
+import type { ActivitySeen } from "../orca/activity.ts";
+import { DEFAULT_FLEET_CONFIG, isInProgress, summarize, type FleetState, type WorkerDetail, type WorkerRow } from "../orca/fleet.ts";
 import type { TaskSnapshot } from "../tasks/manager.ts";
 import { formatDuration, shortId } from "../text.ts";
 
@@ -46,8 +47,8 @@ export interface OrcaCardInput {
 	objective?: string;
 	/** Agent, model and start time per dispatch id. */
 	details?: Map<string, WorkerDetail>;
-	/** Latest activity line per dispatch id, from its terminal. */
-	activity?: Map<string, string>;
+	/** Latest activity per dispatch id, from its terminal, and since when it is unchanged. */
+	activity?: Map<string, ActivitySeen>;
 	/** The model an agent uses when no `--model` was passed, if known. */
 	defaultModel?: (agent: string) => string | undefined;
 	collapsed?: boolean;
@@ -130,13 +131,16 @@ interface WorkerLook {
 }
 
 /** What one open (or to-release) worker is doing, in plain words. */
-export function workerLook(r: WorkerRow, activitySince: number, now: number, stallMs = 3 * 60_000): WorkerLook {
+export function workerLook(r: WorkerRow, activitySince: number, now: number, stallMs = 3 * 60_000, seen?: ActivitySeen, quietMs = DEFAULT_FLEET_CONFIG.quietMs): WorkerLook {
 	if (r.nextAction === "release") {
 		return r.outcome === "failed" ? { mark: "✖", state: "falló · falta cerrarlo", tone: "error" } : { mark: "✔", state: "terminó · falta cerrarlo", tone: "success" };
 	}
 	if (r.activity === "blocked") return { mark: "⚠", state: "esperando una respuesta en su terminal", tone: "warning" };
 	if (r.livenessReason === "stale_status") return { mark: "⏸", state: "sin señal", tone: "warning" };
-	if (r.activity === "working") return { mark: "▸", state: "trabajando" };
+	if (r.activity === "working") {
+		const quiet = seen && !seen.text.startsWith("⏵ ") ? now - seen.since : 0;
+		return quiet >= quietMs ? { mark: "⏸", state: `sin cambios ${formatDuration(quiet)}`, tone: "warning" } : { mark: "▸", state: "trabajando" };
+	}
 	if (r.activity === "done" || r.activity === "idle") {
 		return now - activitySince >= stallMs ? { mark: "⏸", state: `parado ${formatDuration(now - activitySince)} sin terminar`, tone: "warning" } : { mark: "·", state: "esperando" };
 	}
@@ -179,7 +183,8 @@ export function buildOrcaCard(input: OrcaCardInput): CardModel | undefined {
 			if (isInProgress(r)) open++;
 			const task = fleet.tasks.get(r.taskId);
 			const detail = input.details?.get(r.dispatchId);
-			const look = workerLook(r, t.activitySince, input.now);
+			const seen = isInProgress(r) ? input.activity?.get(r.dispatchId) : undefined;
+			const look = workerLook(r, t.activitySince, input.now, undefined, seen);
 			if (look.tone === "warning" || look.tone === "error") tone.raise(look.tone === "error" ? "warning" : look.tone);
 			const elapsed = detail?.startedAt != null ? formatDuration(Math.max(0, (t.settledAt ?? input.now) - detail.startedAt)) : "";
 			const human = r.ownership === "user_owned" ? " · lo manejas tú" : "";
@@ -187,8 +192,7 @@ export function buildOrcaCard(input: OrcaCardInput): CardModel | undefined {
 			const model = detail?.model || (agent ? input.defaultModel?.(agent) : undefined);
 			const who = [agent, model ? `${model}${detail?.model ? "" : " (por defecto)"}${detail?.effort ? ` ${detail.effort}` : ""}` : ""].filter(Boolean).join(" · ");
 			rows.push({ text: `${look.mark} ${task?.title || r.taskId} · ${look.state}${elapsed ? ` · ${elapsed}` : ""}${who ? ` · ${who}` : ""}${human}`, ...(look.tone ? { tone: look.tone } : {}) });
-			const doing = isInProgress(r) ? input.activity?.get(r.dispatchId) : undefined;
-			if (doing) rows.push({ text: `  ↳ ${oneLine(doing)}`, tone: "muted" });
+			if (seen) rows.push({ text: `  ↳ ${oneLine(seen.text)}`, tone: "muted" });
 		}
 	}
 	// Nothing orchestrated and nothing wrong: a listening bridge alone is noise.

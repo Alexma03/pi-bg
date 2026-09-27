@@ -20,6 +20,8 @@ test("consuming checks are detected in any shape", () => {
 test("read-only checks and other orca verbs are allowed", () => {
 	assert.deepEqual(classifyOrcaCommand("orca orchestration check --peek --json"), ["peek-check"]);
 	assert.deepEqual(classifyOrcaCommand("orca orchestration check --all --json"), ["peek-check"]);
+	assert.deepEqual(classifyOrcaCommand("orca orchestration check --help"), ["peek-check"]);
+	assert.deepEqual(classifyOrcaCommand("orca orchestration check -h"), ["peek-check"]);
 	assert.deepEqual(classifyOrcaCommand("orca orchestration worker-list --json"), ["other"]);
 	assert.deepEqual(classifyOrcaCommand("orca orchestration send --to run:r --body check"), ["other"]);
 	assert.deepEqual(classifyOrcaCommand("grep 'orchestration check' AGENTS.md"), ["other"]);

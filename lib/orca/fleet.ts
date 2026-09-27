@@ -153,7 +153,7 @@ export function humanOwned(row: WorkerRow): boolean {
 	return row.ownership === "user_owned";
 }
 
-export type FleetEventKind = "stalled" | "blocked" | "exited" | "attention" | "settled" | "release" | "ready_tasks" | "fleet_idle" | "resumed";
+export type FleetEventKind = "stalled" | "quiet" | "blocked" | "exited" | "attention" | "settled" | "release" | "ready_tasks" | "fleet_idle" | "resumed";
 
 export interface FleetEvent {
 	kind: FleetEventKind;
@@ -171,11 +171,13 @@ export interface FleetEvent {
 
 export interface FleetConfig {
 	stallMs: number;
+	/** A working agent whose activity has not changed this long is reported once. */
+	quietMs: number;
 	blockedMs: number;
 	releaseGraceMs: number;
 }
 
-export const DEFAULT_FLEET_CONFIG: FleetConfig = { stallMs: 3 * 60_000, blockedMs: 60_000, releaseGraceMs: 3 * 60_000 };
+export const DEFAULT_FLEET_CONFIG: FleetConfig = { stallMs: 3 * 60_000, quietMs: 10 * 60_000, blockedMs: 60_000, releaseGraceMs: 3 * 60_000 };
 
 export type WatchOn = "settled" | "stalled" | "blocked" | "any";
 
@@ -343,6 +345,28 @@ export function readyTasks(state: FleetState): TaskRow[] {
 	return [...state.tasks.values()].filter(
 		(t) => (t.status === "pending" || t.status === "ready") && !dispatched.has(t.id) && t.deps.every((d) => state.tasks.get(d)?.status === "completed"),
 	);
+}
+
+/**
+ * Working agents whose live activity (see activity.ts) has not changed for
+ * `quietMs`: the same command or line for too long. Each quiet episode is
+ * reported once; waiting on the agent's own background task does not count.
+ * Mutates `notified` of the tracked workers it reports.
+ */
+export function quietEvents(state: FleetState, activity: Map<string, { text: string; since: number }>, now: number, config: FleetConfig = DEFAULT_FLEET_CONFIG): FleetEvent[] {
+	const events: FleetEvent[] = [];
+	for (const tracked of state.workers.values()) {
+		const r = tracked.row;
+		const seen = activity.get(r.dispatchId);
+		if (!seen || !isInProgress(r) || r.activity !== "working" || humanOwned(r) || seen.text.startsWith("⏵ ")) continue;
+		const quiet = now - seen.since;
+		if (quiet < config.quietMs) continue;
+		const key = `quiet:${seen.since}`;
+		if (tracked.notified.has(key)) continue;
+		tracked.notified.add(key);
+		events.push({ kind: "quiet", dispatchId: r.dispatchId, taskId: r.taskId, title: titleOf(state, r), sinceMs: quiet, detail: `still at: ${seen.text}`, notes: state.watches.filter((w) => w.dispatchId === r.dispatchId && (w.on.includes("stalled") || w.on.includes("any")) && w.note).map((w) => w.note), key });
+	}
+	return events;
 }
 
 /** Seed notified keys recorded before a reload (fleet-level key included). */

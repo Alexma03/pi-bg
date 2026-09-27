@@ -38,7 +38,9 @@ export function classifyOrcaCommand(command: string): OrcaCommandKind[] {
 		if (group !== "orchestration") continue;
 		if (verb === "check") {
 			// --ack mutates the mailbox even alongside --peek / --all.
-			const readOnly = (rest.includes("--peek") || rest.includes("--all")) && !rest.some((t) => t === "--ack" || t.startsWith("--ack="));
+			// `--help` / `-h` only prints usage and never reaches the mailbox.
+			const help = rest.some((t) => t === "--help" || t === "-h");
+			const readOnly = help || ((rest.includes("--peek") || rest.includes("--all")) && !rest.some((t) => t === "--ack" || t.startsWith("--ack=")));
 			kinds.push(readOnly ? "peek-check" : "consuming-check");
 		} else if (verb === "run-create" || verb === "run-use") {
 			kinds.push("bind");

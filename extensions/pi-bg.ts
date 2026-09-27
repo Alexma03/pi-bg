@@ -634,14 +634,17 @@ export default function piBg(pi: ExtensionAPI) {
 		pi.registerTool({
 			name: "orca_workers",
 			label: "Orca workers",
-			description: "Show the fleet of the bound Run (read-only): each open worker with outcome, activity and its age, liveness, attention and nextAction, plus tasks that have no worker. all=true includes settled history; refresh=true polls Orca now.",
+			description: "Show the fleet of the bound Run (read-only): each open worker with outcome, activity and its age, agent and model, what it is doing now (from its terminal) and how long that has been unchanged, liveness, attention and nextAction, plus tasks that have no worker. all=true includes settled history; refresh=true polls Orca now.",
 			parameters: Type.Object({ all: Type.Optional(Type.Boolean()), refresh: Type.Optional(Type.Boolean()) }, { additionalProperties: false }),
 			renderResult: compactResult,
 			async execute(_id, params) {
 				if (!fleet || !fleet.runId) return { content: [{ type: "text", text: "No Run is bound, so there is no fleet to show." }], details: undefined };
-				if (params.refresh || fleet.lastPollAt === null) await fleet.poll();
+				if (params.refresh || fleet.lastPollAt === null) {
+					await fleet.poll();
+					await fleet.readActivity();
+				}
 				const header = fleet.lastError ? `(warning: ${fleet.lastError})\n` : "";
-				return { content: [{ type: "text", text: header + formatWorkersTable(fleet.state, fleet.runId, now(), { all: params.all }) }], details: undefined };
+				return { content: [{ type: "text", text: header + formatWorkersTable(fleet.state, fleet.runId, now(), { all: params.all, activity: fleet.activity, details: fleet.details }) }], details: undefined };
 			},
 		});
 
@@ -709,7 +712,7 @@ export default function piBg(pi: ExtensionAPI) {
 				else if (arg === "on") b.turnOn();
 				else if (arg && arg !== "status") b.watchRun(arg);
 				const s = b.state;
-				const fleetLine = fleet?.runId ? `\n${formatWorkersTable(fleet.state, fleet.runId, now()).split("\n").slice(0, 8).join("\n")}` : "";
+				const fleetLine = fleet?.runId ? `\n${formatWorkersTable(fleet.state, fleet.runId, now(), { activity: fleet.activity, details: fleet.details }).split("\n").slice(0, 8).join("\n")}` : "";
 				ctx.ui.notify(`orca bridge: ${s.phase} · run ${s.runId ?? "none"} · ${s.reason}${s.pending ? ` · pending ${s.pending.id}` : ""} · heartbeats acked ${s.heartbeatsAcked}${s.lastError ? `\nlast error: ${s.lastError}` : ""}${fleetLine}`, "info");
 			},
 		});
