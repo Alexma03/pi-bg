@@ -44,3 +44,16 @@ test("--ack makes a peek or history check consuming", () => {
 	assert.deepEqual(classifyOrcaCommand("orca orchestration check --ack d1 --peek --json"), ["consuming-check"]);
 	assert.deepEqual(classifyOrcaCommand("orca orchestration check --all --ack=d1"), ["consuming-check"]);
 });
+
+test("text that only mentions a check (heredoc bodies, quoted strings) is not a check", () => {
+	const heredoc = "cat > t.ts <<'EOF'\nconst c = \"orca orchestration check --json\";\nEOF\nnode t.ts";
+	assert.deepEqual(classifyOrcaCommand(heredoc), ["other"]);
+	assert.deepEqual(classifyOrcaCommand("python3 - <<EOF\nprint('orca orchestration check')\nEOF"), ["other"]);
+	assert.deepEqual(classifyOrcaCommand("git commit -m 'guard: orca orchestration check --help is fine'"), ["other"]);
+	assert.deepEqual(classifyOrcaCommand('echo "run orca orchestration check later"'), ["other"]);
+	// Still code: after the heredoc, inside bash -c, and with quoted one-word arguments.
+	assert.deepEqual(classifyOrcaCommand('orca orchestration send --type "worker_done" --task-id t'), ["worker-done"]);
+	assert.deepEqual(classifyOrcaCommand("cat <<EOF\nhi\nEOF\norca orchestration check --json"), ["consuming-check"]);
+	assert.deepEqual(classifyOrcaCommand("bash -c 'orca orchestration check --json'"), ["consuming-check"]);
+	assert.deepEqual(classifyOrcaCommand('orca orchestration check --terminal "$H" --json'), ["consuming-check"]);
+});

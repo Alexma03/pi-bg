@@ -1,15 +1,40 @@
 // Classifies shell commands the model runs through the bash tool, so the
 // bridge can (a) block a second mailbox consumer and (b) notice Run binding
 // changes. Heuristic by design: it splits on shell separators and inspects
-// each simple command; quoting tricks can evade it, which only costs the
-// protection, never correctness of the bridge itself.
+// each simple command, ignoring heredoc bodies and quoted strings; quoting
+// tricks can evade it, which only costs the protection, never correctness of
+// the bridge itself.
 
 export type OrcaCommandKind = "consuming-check" | "peek-check" | "bind" | "worker-start" | "worker-done" | "escalation" | "ask" | "other";
 
 const SEPARATORS = /\|\||&&|[;|&\n]|\$\(|`/;
 
+/**
+ * Drop text the shell never runs as a command: heredoc bodies and quoted
+ * strings (a script or test that merely mentions `orca orchestration check`).
+ * A quoted string after `-c` or `eval` is still code, so it is kept.
+ */
+export function stripInert(command: string): string {
+	const out: string[] = [];
+	const terminators: string[] = [];
+	for (const line of command.split("\n")) {
+		if (terminators.length) {
+			if (line.replace(/^\t+/, "").trim() === terminators[0]) terminators.shift();
+			continue;
+		}
+		for (const m of line.matchAll(/<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1/g)) terminators.push(m[2]);
+		out.push(line);
+	}
+	return out
+		.join("\n")
+		.replace(/(^|[^\\])(['"])((?:\\.|(?!\2)[^\\])*)\2/g, (whole, before: string, quote: string, body: string, offset: number, all: string) => {
+			const lead = all.slice(Math.max(0, offset - 8), offset + before.length);
+			return /(^|\s)(-c|eval)\s*$/.test(lead) || !/\s/.test(body) ? whole : `${before}${quote}${quote}`;
+		});
+}
+
 function segments(command: string): string[] {
-	return command
+	return stripInert(command)
 		.split(SEPARATORS)
 		.map((s) => s.trim())
 		.filter(Boolean);
