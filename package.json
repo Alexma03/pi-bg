@@ -1,99 +1,35 @@
 {
-	"name": "orca",
-	"version": "1.4.212",
-	"description": "Next-gen IDE for parallel agentic development",
-	"homepage": "https://github.com/stablyai/orca",
-	"author": "stablyai",
-	"bin": {
-		"orca": "./out/cli/index.js",
-		"orca-dev": "./config/scripts/orca-dev.mjs"
-	},
-	"main": "./out/main/index.js",
-	"dependencies": {
-		"@anthropic-ai/claude-agent-sdk": "0.3.251",
-		"@electron-toolkit/utils": "^4.0.0",
-		"@floating-ui/dom": "1.7.6",
-		"@linear/sdk": "^82.1.0",
-		"@parcel/watcher": "^2.5.6",
-		"@streamparser/json": "0.0.26",
-		"@xterm/addon-serialize": "0.15.0-beta.300",
-		"@xterm/headless": "6.1.0-beta.302",
-		"agent-browser": "~0.27.0",
-		"electron-updater": "^6.8.9",
-		"i18next": "^26.3.1",
-		"jsonc-parser": "^3.3.1",
-		"node-pty": "^1.1.0",
-		"posthog-node": "^5.33.3",
-		"proper-lockfile": "4.1.2",
-		"qrcode": "^1.5.4",
-		"react-i18next": "17.0.13",
-		"serve-sim": "0.1.40",
-		"sherpa-onnx": "1.12.37",
-		"ssh2": "^1.17.0",
-		"tldts": "7.4.12",
-		"tweetnacl": "^1.0.3",
-		"ws": "^8.21.3",
-		"yaml": "^2.8.4",
-		"zod": "~4.5.4"
-	},
-	"optionalDependencies": {
-		"@orca/windows-registry": "workspace:*",
-		"@vscode/windows-process-tree": "0.8.0",
-		"sherpa-onnx-darwin-arm64": "1.12.37",
-		"sherpa-onnx-darwin-x64": "1.12.37",
-		"sherpa-onnx-linux-arm64": "1.12.37",
-		"sherpa-onnx-linux-x64": "1.12.37",
-		"sherpa-onnx-win-x64": "1.12.37"
-	},
-	"lint-staged": {
-		"{*.{ts,tsx,js,jsx,mjs,mts,cts},!(cloud)/**/*.{ts,tsx,js,jsx,mjs,mts,cts}}": [
-			"oxlint",
-			"oxlint --config config/oxlint-react-doctor.json",
-			"oxfmt --write"
-		],
-		"{*.{json,css},!(cloud)/**/*.{json,css}}": [
-			"oxfmt --write"
+	"name": "pi-bg",
+	"version": "0.1.0",
+	"private": true,
+	"description": "Background tasks for Pi with wake-on-exit notices, plus a first-class Orca orchestration mailbox bridge for coordinator sessions.",
+	"license": "MIT",
+	"type": "module",
+	"keywords": [
+		"pi-package",
+		"pi",
+		"orca",
+		"background-tasks"
+	],
+	"pi": {
+		"extensions": [
+			"./extensions"
 		]
 	},
-	"engines": {
-		"node": "24"
+	"scripts": {
+		"test": "node --experimental-strip-types --no-warnings --test tests/*.test.ts",
+		"typecheck": "tsc -p tsconfig.json"
 	},
-	"packageManager": "pnpm@12.0.0+sha512.9e2e3dc3911995868dc94b8175c217c27e95408fa03b4a22749778f2b34f773b77cdd3b39ede8171b22fcd53be6a35342e9fac9948a68ef58df6488ce89a7e67",
-	"reactDoctor": {
-		"ignore": {
-			"overrides": [
-				{
-					"files": [
-						"src/renderer/src/components/editor/combined-diff/review-controls/use-combined-diff-view-preferences.ts"
-					],
-					"rules": [
-						"react-doctor/no-derived-state-effect"
-					]
-				},
-				{
-					"files": [
-						"src/renderer/src/components/use-task-page-github-issue-draft.ts",
-						"src/renderer/src/components/use-task-page-jira-creation-state.ts"
-					],
-					"rules": [
-						"react-doctor/no-adjust-state-on-prop-change"
-					]
-				},
-				{
-					"files": [
-						"src/renderer/src/components/editor/combined-diff/browse-files/use-combined-diff-tree-navigation.ts",
-						"src/renderer/src/components/editor/combined-diff/load-sections/combined-diff-section-load-registry.ts",
-						"src/renderer/src/components/editor/combined-diff/review-controls/use-combined-diff-section-actions.ts"
-					],
-					"rules": [
-						"react-doctor/no-ref-current-in-render"
-					]
-				}
-			]
-		},
-		"rules": {
-			"react-doctor/js-combine-iterations": "off"
-		}
+	"peerDependencies": {
+		"@earendil-works/pi-coding-agent": ">=0.87.1",
+		"typebox": "*"
+	},
+	"devDependencies": {
+		"@earendil-works/pi-coding-agent": "0.87.1",
+		"@earendil-works/pi-tui": "0.87.1",
+		"@types/node": "^24.13.3",
+		"typebox": "1.3.27",
+		"typescript": "^5.9.3"
 	},
 	"repository": {
 		"type": "git",
