@@ -61,7 +61,24 @@ export function formatNotice(n: TaskNotice, maxChars = 2_400): string {
 
 /** One message for several notices that settled together. */
 export function formatNotices(notices: TaskNotice[], maxChars = 8_000): string {
-	const header = notices.length === 1 ? "pi-bg:" : `pi-bg: ${notices.length} background task updates`;
-	const perNotice = Math.max(600, Math.floor((maxChars - 100) / Math.max(1, notices.length)));
-	return clip([header, ...notices.map((n) => formatNotice(n, perNotice))].join("\n"), maxChars);
+	if (notices.length === 1) return clip(`pi-bg:\n${formatNotice(notices[0], maxChars - 10)}`, maxChars);
+	// Every task keeps its headline (status, exit code) before any detail, so a
+	// failure is never clipped away when many tasks settle together.
+	const headlines = notices.map((n) => `- ${noticeHeadline(n)}`);
+	const head = [`pi-bg: ${notices.length} background task updates`, ...headlines].join("\n");
+	const room = maxChars - head.length - 1;
+	if (room < 300) return clip(head, maxChars) + "\nDetails: bg_status / bg_tail.";
+	const perNotice = Math.max(300, Math.floor(room / notices.length));
+	const details: string[] = [];
+	let used = 0;
+	for (const n of notices) {
+		const text = formatNotice(n, perNotice);
+		if (used + text.length + 1 > room) {
+			details.push(`… details for ${notices.length - details.length} more: bg_status / bg_tail.`);
+			break;
+		}
+		details.push(text);
+		used += text.length + 1;
+	}
+	return `${head}\n${details.join("\n")}`;
 }

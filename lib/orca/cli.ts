@@ -12,6 +12,8 @@ export type CliError = {
 	/** Orca error code, or a pi-bg transport code (`transport`, `spawn`, `parse`). */
 	code: string;
 	message: string;
+	/** Set when Orca applied an --ack before refusing the wait. */
+	acknowledged?: string | null;
 };
 
 export type CheckOutcome =
@@ -103,6 +105,11 @@ export function parseCheckOutput(capture: CliCapture): CheckOutcome {
 	const acknowledged = typeof result.acknowledged === "string" ? result.acknowledged : null;
 	const delivery = parseDelivery(result);
 	if (delivery) return { kind: "delivery", delivery, acknowledged };
+	// Orca 1.4.212 answers an `--ack X --wait` whose ack applied but whose
+	// wait was refused with ok:true and `waitInterrupted`.
+	if (typeof result.waitInterrupted === "string" && result.waitInterrupted) {
+		return { kind: "error", code: result.waitInterrupted, message: `wait refused after ack (${result.waitInterrupted})`, acknowledged };
+	}
 	return {
 		kind: "empty",
 		acknowledged,

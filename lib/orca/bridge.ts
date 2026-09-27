@@ -1,13 +1,17 @@
 // The Orca bridge driver: runs the effects that machine.ts decides. It owns
 // the single waiter child, the retry timer, Run detection and the ack call.
 
-import { execFile, type ChildProcess } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
 import { mkdir, writeFile, readdir, stat, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { spawnGroup, terminateGroup, killGroup } from "../spawn.ts";
 import { checkArgs, parseCheckOutput, parseRunCurrentOutput, type CheckOutcome, type CliCapture } from "./cli.ts";
 import type { Delivery } from "./delivery.ts";
 import { initialState, step, type Effect, type OrcaEvent, type OrcaState } from "./machine.ts";
+import { runOrcaCli, STDERR_TAIL, STDOUT_CAP } from "./exec.ts";
+import { backoffDelay, TRANSPORT_BACKOFF } from "../backoff.ts";
+
+const MAX_FENCE_STREAK = 3;
 
 export interface BridgeDeps {
 	orcaBin: string;
@@ -31,9 +35,6 @@ export interface AckReply {
 	rawPath?: string;
 }
 
-const STDOUT_CAP = 4 * 1024 * 1024;
-const STDERR_TAIL = 8 * 1024;
-const CLI_TIMEOUT_MS = 20_000;
 
 export class OrcaBridge {
 	state: OrcaState = initialState();
@@ -47,6 +48,9 @@ export class OrcaBridge {
 	private ackWaiters: Array<(reply: AckReply) => void> = [];
 	private disposed = false;
 	private detecting = false;
+	private detectFailures = 0;
+	/** Consecutive consumer fences without a successful wait in between. */
+	private fenceStreak = 0;
 	private readonly deps: BridgeDeps;
 
 	constructor(deps: BridgeDeps) {
@@ -83,12 +87,27 @@ export class OrcaBridge {
 			const capture = await this.runCli(["orchestration", "run-current", "--json"]);
 			if (this.disposed || this.userOff) return;
 			const outcome = parseRunCurrentOutput(capture);
-			if (outcome.kind === "run" && outcome.runId) {
+			if (outcome.kind === "error") {
+				// A transient failure (Orca restarting, CLI timeout) never tears down a
+				// live waiter or a pending delivery: keep the phase and retry soon.
+				this.detectFailures++;
+				this.state = { ...this.state, lastError: `run-current: ${outcome.code}: ${outcome.message}`.slice(0, 300), ...(this.state.phase === "off" ? { reason: `detection failed (${outcome.code}); retrying` } : {}) };
+				this.deps.onChange();
+				this.detectSoon(backoffDelay(TRANSPORT_BACKOFF, this.detectFailures - 1));
+				return;
+			}
+			this.detectFailures = 0;
+			if (outcome.runId) {
+				if (this.state.phase === "fenced" && this.state.runId === outcome.runId && this.fenceStreak >= MAX_FENCE_STREAK) {
+					// Another terminal keeps taking this Run: stop competing for it.
+					this.state = { ...this.state, reason: `fenced ${this.fenceStreak} times on this Run; /orca-watch on to retry` };
+					this.deps.onChange();
+					return;
+				}
 				this.dispatch({ type: "enable", runId: outcome.runId, explicit: false });
 				return;
 			}
-			const reason = outcome.kind === "error" ? `detection failed (${outcome.code})` : "no Run bound";
-			if (this.state.phase !== "off" || this.state.reason !== reason) this.dispatch({ type: "disable", reason });
+			if (this.state.phase !== "off" || this.state.reason !== "no Run bound") this.dispatch({ type: "disable", reason: "no Run bound" });
 			this.schedulePoll();
 		} finally {
 			this.detecting = false;
@@ -122,6 +141,7 @@ export class OrcaBridge {
 
 	turnOn(): void {
 		this.userOff = false;
+		this.fenceStreak = 0;
 		if (this.state.phase === "off" || this.state.phase === "fenced") {
 			this.state = { ...this.state, explicitRun: false };
 			void this.detect();
@@ -176,7 +196,8 @@ export class OrcaBridge {
 				return;
 			}
 			case "redetect":
-				this.detectSoon(effect.delayMs);
+				this.fenceStreak++;
+				this.detectSoon(effect.delayMs * 2 ** Math.min(6, this.fenceStreak - 1));
 				return;
 			case "remind":
 				this.deps.remind(effect.delivery);
@@ -204,6 +225,7 @@ export class OrcaBridge {
 		this.waiter = undefined;
 		const outcome = parseCheckOutput(capture);
 		if (outcome.kind === "error") this.deps.log?.(`orca check failed: ${outcome.code}: ${outcome.message}`);
+		else this.fenceStreak = 0;
 		this.dispatch({ type: "waitResult", outcome, sentAck: ack, now: this.deps.now() });
 	}
 
@@ -225,16 +247,7 @@ export class OrcaBridge {
 	}
 
 	private runCli(args: string[]): Promise<CliCapture> {
-		return new Promise((resolve) => {
-			execFile(this.deps.orcaBin, args, { cwd: this.deps.cwd, env: this.deps.env, timeout: CLI_TIMEOUT_MS, maxBuffer: STDOUT_CAP }, (error, stdout, stderr) => {
-				const err = error as (NodeJS.ErrnoException & { code?: string | number; signal?: string }) | null;
-				if (err && err.code === "ENOENT") {
-					resolve({ stdout: "", stderr: "", exitCode: null, signal: null, spawnError: `${this.deps.orcaBin} not found on PATH` });
-					return;
-				}
-				resolve({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "").slice(-STDERR_TAIL), exitCode: err ? (typeof err.code === "number" ? err.code : 1) : 0, signal: err?.signal ?? null });
-			});
-		});
+		return runOrcaCli(this.deps.orcaBin, args, { cwd: this.deps.cwd, env: this.deps.env });
 	}
 
 	private async saveRaw(delivery: Delivery): Promise<string | undefined> {

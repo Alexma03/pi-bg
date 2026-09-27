@@ -29,3 +29,16 @@ test("run binding commands are detected", () => {
 	assert.deepEqual(classifyOrcaCommand('orca orchestration run-create --objective "x" --json'), ["bind"]);
 	assert.deepEqual(classifyOrcaCommand("orca orchestration run-use --run run_1"), ["bind"]);
 });
+
+test("lifecycle commands are classified for fleet and worker tracking", () => {
+	assert.deepEqual(classifyOrcaCommand('orca orchestration worker-start --agent pi --spec "x" --json'), ["worker-start"]);
+	assert.deepEqual(classifyOrcaCommand('orca orchestration send --from term_1 --type worker_done --subject "done" --body "ok" --task-id t --dispatch-id d'), ["worker-done"]);
+	assert.deepEqual(classifyOrcaCommand('orca orchestration send --type escalation --subject "Blocked"'), ["escalation"]);
+	assert.deepEqual(classifyOrcaCommand('orca orchestration ask --from term_1 --question "which?"'), ["ask"]);
+	assert.deepEqual(classifyOrcaCommand('orca orchestration send --type status --subject "x"'), ["other"]);
+});
+
+test("--ack makes a peek or history check consuming", () => {
+	assert.deepEqual(classifyOrcaCommand("orca orchestration check --ack d1 --peek --json"), ["consuming-check"]);
+	assert.deepEqual(classifyOrcaCommand("orca orchestration check --all --ack=d1"), ["consuming-check"]);
+});

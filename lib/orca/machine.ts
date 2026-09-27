@@ -82,6 +82,9 @@ export const FENCE_CODES = new Set([
 	"legacy_read_only",
 ]);
 
+/** Codes meaning Orca no longer knows the pending delivery: drop it, re-arm. */
+export const STALE_DELIVERY_CODES = new Set(["stale_delivery", "delivery_not_found"]);
+
 export const REMIND_AFTER_MS = 10 * 60_000;
 const ID_HISTORY = 200;
 const REDETECT_MS = 5_000;
@@ -247,7 +250,10 @@ function onWaitResult(state: OrcaState, outcome: CheckOutcome, sentAck: string |
 	// A result that arrives after disable/fence/re-enable belongs to a killed
 	// waiter; the driver tags results, but stay defensive here too.
 	if (state.phase !== "waiting") return { state, effects: [] };
-	const base: OrcaState = outcome.kind !== "error" && sentAck ? { ...state, ackCarry: null } : state;
+	// The carried ack applied when the call succeeded, or when Orca reports it
+	// acknowledged before refusing the wait (waitInterrupted).
+	const ackApplied = sentAck !== null && (outcome.kind !== "error" || outcome.acknowledged === sentAck);
+	const base: OrcaState = ackApplied ? { ...state, ackCarry: null } : state;
 	switch (outcome.kind) {
 		case "delivery":
 			return acceptDelivery(base, outcome.delivery, now, sentAck, random);
@@ -268,6 +274,16 @@ function onAckResult(state: OrcaState, outcome: CheckOutcome, deliveryId: string
 	const restore: OrcaState = { ...state, phase: "pending", reason: "pending ack" };
 	switch (outcome.kind) {
 		case "error": {
+			if (STALE_DELIVERY_CODES.has(outcome.code)) {
+				const next: OrcaState = { ...state, pending: null, pendingSince: null, phase: "waiting", reason: "waiting", ackCarry: null, lastError: `${outcome.code}: ${outcome.message}`.slice(0, 300) };
+				return {
+					state: next,
+					effects: [
+						{ type: "spawnWait", ack: null },
+						{ type: "ackReply", ok: true, text: `Orca no longer recognizes ${deliveryId} (${outcome.code}); pi-bg dropped it and re-armed the waiter. Anything still outstanding is delivered again with a REPLAY note, so do not retry this ack.` },
+					],
+				};
+			}
 			if (FENCE_CODES.has(outcome.code)) {
 				const fenced = fence(state, outcome.code, outcome.message);
 				return { state: fenced.state, effects: [...fenced.effects, { type: "ackReply", ok: false, text: `Ack failed: this terminal is no longer the Run consumer (${outcome.code}). The bridge stopped; see /orca-watch status.` }] };

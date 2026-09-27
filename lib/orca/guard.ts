@@ -4,7 +4,7 @@
 // each simple command; quoting tricks can evade it, which only costs the
 // protection, never correctness of the bridge itself.
 
-export type OrcaCommandKind = "consuming-check" | "peek-check" | "bind" | "other";
+export type OrcaCommandKind = "consuming-check" | "peek-check" | "bind" | "worker-start" | "worker-done" | "escalation" | "ask" | "other";
 
 const SEPARATORS = /\|\||&&|[;|&\n]|\$\(|`/;
 
@@ -37,9 +37,19 @@ export function classifyOrcaCommand(command: string): OrcaCommandKind[] {
 		const [group, verb] = rest.filter((t) => !t.startsWith("-"));
 		if (group !== "orchestration") continue;
 		if (verb === "check") {
-			kinds.push(rest.includes("--peek") || rest.includes("--all") ? "peek-check" : "consuming-check");
+			// --ack mutates the mailbox even alongside --peek / --all.
+			const readOnly = (rest.includes("--peek") || rest.includes("--all")) && !rest.some((t) => t === "--ack" || t.startsWith("--ack="));
+			kinds.push(readOnly ? "peek-check" : "consuming-check");
 		} else if (verb === "run-create" || verb === "run-use") {
 			kinds.push("bind");
+		} else if (verb === "worker-start") {
+			kinds.push("worker-start");
+		} else if (verb === "ask") {
+			kinds.push("ask");
+		} else if (verb === "send") {
+			const type = rest[rest.indexOf("--type") + 1];
+			if (rest.includes("--type") && type === "worker_done") kinds.push("worker-done");
+			else if (rest.includes("--type") && type === "escalation") kinds.push("escalation");
 		}
 	}
 	return kinds.length ? kinds : ["other"];

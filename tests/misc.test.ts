@@ -8,6 +8,7 @@ import { initialState } from "../lib/orca/machine.ts";
 import { clip, formatDuration, lastLines, sanitizeTerminal } from "../lib/text.ts";
 import { formatNotice, formatNotices, type TaskNotice } from "../lib/tasks/notice.ts";
 import { LineSplitter, Watcher } from "../lib/tasks/watch.ts";
+import { createWakeBudget, takeWake } from "../lib/wake-budget.ts";
 
 test("backoff grows, caps and jitters within bounds", () => {
 	assert.equal(backoffDelay(TRANSPORT_BACKOFF, 0, () => 0.5), 1_000);
@@ -165,4 +166,27 @@ test("redact leaves ordinary build output unchanged", () => {
 		"ok 42 tests passed",
 	].join("\n");
 	assert.equal(redact(output), output);
+});
+
+test("grouped notices keep every headline even when details overflow", () => {
+	const many = Array.from({ length: 30 }, (_, i) => notice({ id: `bg${i}`, label: `bg${i}`, exitCode: i === 29 ? 1 : 0, lines: Array.from({ length: 15 }, () => "x".repeat(300)) }));
+	const text = formatNotices(many);
+	assert.ok(text.length <= 8_000, String(text.length));
+	for (let i = 0; i < 30; i++) assert.ok(text.includes(`- task bg${i} `), `missing bg${i}`);
+	assert.match(text, /task bg29 FAILED with exit 1/);
+});
+
+
+test("wake budget caps turns per window", () => {
+	let b = createWakeBudget(2, 1000);
+	let r = takeWake(b, 0);
+	assert.equal(r.allowed, true);
+	r = takeWake(r.budget, 10);
+	assert.equal(r.allowed, true);
+	r = takeWake(r.budget, 20);
+	assert.equal(r.allowed, false);
+	r = takeWake(r.budget, 1001);
+	assert.equal(r.allowed, true);
+	b = r.budget;
+	assert.equal(b.wakes.length, 2);
 });

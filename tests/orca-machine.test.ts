@@ -186,3 +186,20 @@ test("one reminder after a long pending delivery", () => {
 	assert.equal(r.effects[0].type, "remind");
 	assert.deepEqual(step(r.state, { type: "tick", now: REMIND_AFTER_MS * 2 }, fixed).effects, []);
 });
+
+test("stale_delivery on ack drops the pending delivery and re-arms (no ack loop)", () => {
+	const pending = run(enabled(), { type: "waitResult", outcome: got(d("d1", ["worker_done"])), sentAck: null, now: 1 }, { type: "ackRequest", deliveryId: "d1", now: 2 }).state;
+	const r = step(pending, { type: "ackResult", outcome: error("stale_delivery"), deliveryId: "d1", now: 3 }, fixed);
+	assert.equal(r.state.phase, "waiting");
+	assert.equal(r.state.pending, null);
+	assert.deepEqual(r.effects[0], { type: "spawnWait", ack: null });
+	assert.equal((r.effects[1] as { ok: boolean }).ok, true);
+});
+
+test("waitInterrupted after an applied ack clears the carried ack and uses the right policy", () => {
+	const carrying = step(enabled(), { type: "waitResult", outcome: got(d("dh", ["heartbeat"])), sentAck: null, now: 0 }, fixed).state;
+	const r = step(carrying, { type: "waitResult", outcome: { kind: "error", code: "waiter_exists", message: "x", acknowledged: "dh" }, sentAck: "dh", now: 1 }, fixed);
+	assert.equal(r.state.phase, "backoff");
+	assert.equal(r.state.ackCarry, null);
+	assert.deepEqual(r.effects, [{ type: "schedule", delayMs: 15_000 }]);
+});

@@ -32,6 +32,16 @@ Run this plan in a throwaway Pi session in its **own** Orca terminal, with a **t
 | 2.7 | In another terminal of the *same pane*… (skip). Instead, `/orca-watch off`, then from the lab bash run `orca orchestration check --wait --timeout-ms 60000 --json &`, then `/orca-watch on` | The footer shows `orca ⚠ another waiter`, then it recovers after that waiter exits. |
 | 2.8 | Quit the lab Pi | `pgrep -af "orchestration check"` shows no leftover waiter. |
 
+## 2b. v1.1 fleet and worker (test Run only)
+
+| # | Prompt / action | Expected |
+| --- | --- | --- |
+| 3.1 | Start a Pi worker told to run `bg_run "sleep 240"`, wait for its notice, then send `worker_done` | While it waits, Orca shows the worker pane "working"; no stalled notice appears; the worker_done arrives normally. |
+| 3.2 | Start a Pi worker told to send one status and then **stop without worker_done** | The worker gets one pi-bg reminder (continuation). If it still stops, the coordinator gets an "Orca fleet · STALLED" notice about 3 min later. |
+| 3.3 | `orca_watch` on a worker with a note, then let it finish | The settled notice carries the note verbatim. |
+| 3.4 | `/reload` the coordinator with open workers | No storm: at most one fleet notice for the current problems. |
+| 3.5 | Card | It shows running tasks (last line), the bridge row and the open workers; `/bg card collapse` keeps only problems. |
+
 ## 3. Cleanup
 
 1. Release the lab worker: `worker-release`.

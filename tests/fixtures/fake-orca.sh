@@ -3,6 +3,7 @@
 #   run.json        stdout for `orchestration run-current --json`
 #   queue/NNN.json  responses for `check`, consumed in name order
 #   calls.log       one line per invocation (argv)
+#   workers.json / tasks.json  stdout for worker-list / task-list
 # A `check --wait` with an empty queue sleeps until one appears (or 5 s,
 # then answers timedOut), like the real waiter.
 set -u
@@ -10,6 +11,14 @@ dir="$FAKE_ORCA_DIR"
 echo "$*" >> "$dir/calls.log"
 if [[ "$1 $2" == "orchestration run-current" ]]; then
 	cat "$dir/run.json"
+	exit 0
+fi
+if [[ "$1 $2" == "orchestration worker-list" ]]; then
+	cat "$dir/workers.json" 2>/dev/null || echo '{"ok":true,"result":{"workers":[],"page":{"hasMore":false,"nextCursor":null}}}'
+	exit 0
+fi
+if [[ "$1 $2" == "orchestration task-list" ]]; then
+	cat "$dir/tasks.json" 2>/dev/null || echo '{"ok":true,"result":{"tasks":[]}}'
 	exit 0
 fi
 if [[ "$1 $2" == "orchestration check" ]]; then

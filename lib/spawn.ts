@@ -17,7 +17,8 @@ import { spawn, type ChildProcess } from "node:child_process";
 
 const WRAPPER = [
 	'parent="$PI_BG_PARENT_PID"',
-	'( while kill -0 "$parent" 2>/dev/null; do sleep 2; done; kill -TERM 0 2>/dev/null; sleep 3; kill -KILL 0 2>/dev/null ) </dev/null >/dev/null 2>&1 &',
+	// The watchdog must survive its own group TERM to send the follow-up KILL.
+	`( while kill -0 "$parent" 2>/dev/null; do sleep 2; done; trap '' TERM; kill -TERM 0 2>/dev/null; sleep 3; kill -KILL 0 2>/dev/null ) </dev/null >/dev/null 2>&1 &`,
 	"watchdog=$!",
 	'"$@"',
 	"status=$?",

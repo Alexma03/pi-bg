@@ -52,12 +52,16 @@ export interface ManagerDeps {
 	now: () => number;
 	onNotice: (notice: TaskNotice) => void;
 	onChange?: () => void;
+	/** Task started / ended, e.g. to tell Orca that child work is live. */
+	onLifecycle?: (id: string, phase: "started" | "ended") => void;
 	env?: NodeJS.ProcessEnv;
 	maxRunning?: number;
 	logMaxBytes?: number;
 	tailChars?: number;
 	noticeLines?: number;
 	killGraceMs?: number;
+	/** Finished tasks kept for bg_status / bg_tail (default 200). */
+	maxFinished?: number;
 }
 
 interface Task {
@@ -77,6 +81,7 @@ interface Task {
 export class TaskManager {
 	private readonly tasks = new Map<string, Task>();
 	private counter = 0;
+	private starting = 0;
 	private readonly stamp: string;
 	private readonly deps: ManagerDeps;
 
@@ -104,7 +109,17 @@ export class TaskManager {
 
 	async start(spec: TaskSpec): Promise<TaskSnapshot> {
 		if (!spec.command.trim()) throw new Error("command must not be empty");
-		if (this.running().length >= this.maxRunning) throw new Error(`Too many running background tasks (${this.maxRunning}); cancel one first.`);
+		// Reserve the slot before awaiting, so parallel bg_run calls cannot all pass the limit.
+		if (this.running().length + this.starting >= this.maxRunning) throw new Error(`Too many running background tasks (${this.maxRunning}); cancel one first.`);
+		this.starting++;
+		try {
+			return await this.launch(spec);
+		} finally {
+			this.starting--;
+		}
+	}
+
+	private async launch(spec: TaskSpec): Promise<TaskSnapshot> {
 		const watcher = spec.watch ? new Watcher(spec.watch) : undefined;
 		await mkdir(this.deps.logDir, { recursive: true, mode: 0o700 });
 		const id = `bg${++this.counter}`;
@@ -150,6 +165,7 @@ export class TaskManager {
 			done: false,
 		};
 		this.tasks.set(id, task);
+		this.deps.onLifecycle?.(id, "started");
 		child.stdout?.setEncoding("utf8");
 		child.stderr?.setEncoding("utf8");
 		child.stdout?.on("data", (chunk: string) => this.onOutput(task, chunk));
@@ -267,11 +283,22 @@ export class TaskManager {
 			const note = notes.length ? notes.join(" ") : undefined;
 			this.emit(task, task.timedOut ? "timeout" : "exit", lines, { stillRunning: false, ...(note ? { note } : {}) });
 		}
+		// The tail only serves the exit notice; bg_tail reads the log file. Keep a
+		// small one when the log is unusable, and bound the finished history.
+		task.tail = task.snap.logError ? task.tail.slice(-4_096) : "";
+		this.pruneFinished();
 		this.changed();
+	}
+
+	private pruneFinished(): void {
+		const max = this.deps.maxFinished ?? 200;
+		const finished = [...this.tasks.values()].filter((t) => t.done);
+		for (const t of finished.slice(0, Math.max(0, finished.length - max))) this.tasks.delete(t.snap.id);
 	}
 
 	private finish(task: Task): void {
 		task.done = true;
+		this.deps.onLifecycle?.(task.snap.id, "ended");
 		task.snap.endedAt = this.deps.now();
 		for (const t of task.timers) clearTimeout(t);
 		task.timers.clear();
@@ -280,6 +307,15 @@ export class TaskManager {
 
 	private changed(): void {
 		this.deps.onChange?.();
+	}
+
+	/** Last non-empty output line of a running task, sanitized and redacted. */
+	lastLine(id: string): string | undefined {
+		const task = this.tasks.get(id);
+		if (!task || task.done) return undefined;
+		const lines = redact(sanitizeTerminal(task.tail.slice(-2_000))).split("\n").filter((l) => l.trim());
+		const last = lines.at(-1);
+		return last === undefined ? undefined : clip(last.trim(), 120);
 	}
 
 	/** Stop a running task. No notice is sent; the caller reports it. */

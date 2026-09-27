@@ -73,3 +73,8 @@ test("checkArgs never passes --types and orders ack before wait", () => {
 	assert.deepEqual(checkArgs({ wait: true, runId: "run_x" }).slice(0, 4), ["orchestration", "check", "--run", "run_x"]);
 	assert.ok(!checkArgs({ wait: true }).includes("--types"));
 });
+
+test("waitInterrupted success documents become errors that remember the ack", () => {
+	const doc = { ok: true, result: { runId: "r", deliveryId: null, messages: [], acknowledged: "d1", timedOut: false, cancelled: false, connectionLost: false, waitInterrupted: "consumer_fenced" } };
+	assert.deepEqual(parseCheckOutput(cap(JSON.stringify(doc))), { kind: "error", code: "consumer_fenced", message: "wait refused after ack (consumer_fenced)", acknowledged: "d1" });
+});

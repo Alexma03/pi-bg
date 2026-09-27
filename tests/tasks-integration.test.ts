@@ -177,3 +177,28 @@ test("the watchdog kills the group when the parent process dies", async () => {
 function require_nonempty(path: string): boolean {
 	return statSync(path).size > 0;
 }
+
+test("parallel starts cannot exceed the running limit", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "pi-bg-test-"));
+	const manager = new TaskManager({ logDir: dir, now: Date.now, onNotice: () => {}, maxRunning: 2, killGraceMs: 200 });
+	const results = await Promise.allSettled([1, 2, 3, 4].map(() => manager.start({ command: "sleep 30", cwd: tmpdir() })));
+	assert.equal(results.filter((r) => r.status === "fulfilled").length, 2);
+	await manager.shutdown(300);
+});
+
+test("the watchdog also kills TERM-ignoring children when the parent dies", async () => {
+	const fakeParent = spawn("sleep", ["0.5"]);
+	const dir = await mkdtemp(join(tmpdir(), "pi-bg-test-"));
+	const pidFile = join(dir, "pid");
+	const child = spawnGroup(["bash", "-c", `trap '' TERM; sleep 60 & echo $! > ${pidFile}; wait`], { cwd: tmpdir(), parentPid: fakeParent.pid });
+	await until(() => {
+		try {
+			return require_nonempty(pidFile);
+		} catch {
+			return false;
+		}
+	});
+	const sleeper = Number((await readFile(pidFile, "utf8")).trim());
+	await until(() => !alive(sleeper), 12_000);
+	killGroup(child.pid, "SIGKILL");
+});

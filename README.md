@@ -70,6 +70,43 @@ The bridge is active only in an interactive Pi session inside an Orca terminal (
 
 The footer segment reads `⏵ 2 bg · orca ◉ run_8da5` while waiting, `orca ◆ ack pending 2m05s` while a delivery is pending, and `orca ⚠ retry 30s` during backoff.
 
+### Fleet watch (coordinator)
+
+While a Run is bound, pi-bg polls `worker-list --run` and `task-list --run` every 30 s. These calls are read-only, use explicit paging, and never touch the mailbox. pi-bg then sends an **Orca fleet** message on these transitions:
+
+- **stalled**: the worker is in progress but its activity has been `done` or `idle` for 3 min, or its status is stale, and it has not sent `worker_done`;
+- **blocked**: an interactive prompt has been open in its terminal for more than 1 min;
+- **exited**: the process exited without `worker_done`;
+- **attention**: Orca reports input, approval, failure or interruption;
+- **to release**: the worker settled and its terminal is still not released after 3 min;
+- **fleet idle**: nobody is working while work is open;
+- **ready tasks**: tasks whose dependencies are done have no worker.
+
+Notices are coalesced over 5 s. At most 4 notices per 10 min start a turn; the rest wait for the next turn. Terminals taken over by a human are not reported as stalled or as closure debt. **The model decides what to do; pi-bg never nudges workers.**
+
+- `orca_workers {all?, refresh?}` shows the fleet table.
+- `orca_watch {dispatchId, on?, note?}` adds events (`settled`, `any`) plus a note that comes back verbatim in the notice. Notes survive `/reload`.
+
+While a `bg_run` task runs, pi-bg emits `subagent:async-started` and `subagent:async-complete` on `pi.events`. Orca's Pi status extension then keeps the pane "working". A worker waiting on a gate is therefore not mistaken for a stalled one, and the Orca UI shows it as busy.
+
+### Worker side
+
+A Pi session that receives an Orca worker preamble (`=== TASK ===` with `--task-id` / `--dispatch-id`) is tracked model-free:
+
+- `worker_done` counts only when the tool result shows Orca accepted it.
+- If a completed turn ends without it, pi-bg appends a reminder and continues the turn (`agent_before_settle`).
+- Reminders are limited to 2 per input, at least 10 min apart.
+- There is no reminder while bg tasks run or messages are queued, or after the user aborts the turn.
+
+The coordinator tools (`orca_ack`, `orca_inbox`, `orca_workers`, `orca_watch`) are active only while this terminal is bound to a Run, so workers keep following their preamble's `check --terminal`. Gentle subagent children always get consuming checks blocked, because they share the lead's terminal identity.
+
+### UI
+
+- **Card.** A "Background · Orca" card above the editor shows running tasks with their last line, the bridge state and the open workers. It appears only when there is something to show. `/bg card on|off|collapse` controls it.
+- **Delivery messages.** They render one glyph per message type (`worker_done` ✔/✖ by outcome, `question` ?, `escalation` ⚠).
+- **Tool results.** They are one line unless expanded.
+- **Live state.** Wake messages end with a short live-state block (running tasks, pending delivery, fleet summary). It is not added to the system prompt, which keeps the prompt cache stable.
+
 ### Environment
 
 | Variable | Effect |
@@ -77,6 +114,7 @@ The footer segment reads `⏵ 2 bg · orca ◉ run_8da5` while waiting, `orca �
 | `PI_BG_DISABLE=1` | Load nothing. |
 | `PI_BG_ORCA=0` | Background tasks only; no Orca bridge or tools. |
 | `PI_BG_ORCA_BIN` | Path of the `orca` CLI (default `orca` on PATH). |
+| `PI_BG_CARD=off` | Start with the card hidden. |
 | `PI_BG_STATE_DIR` | State root (default `$XDG_STATE_HOME/pi-bg` or `~/.local/state/pi-bg`). |
 
 ## Development
