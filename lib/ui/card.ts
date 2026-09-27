@@ -94,9 +94,13 @@ function taskOutcome(t: TaskSnapshot): { mark: string; text: string; tone: Tone 
 }
 
 /** Generic background tasks only; Orca state has its own card. */
+/** Longest command or label shown in a row; the time before it always stays visible. */
+const NAME_MAX = 80;
+
 export function buildBgCard(input: BgCardInput): CardModel | undefined {
 	const ttl = input.finishedTtlMs ?? 60_000;
-	const tasks = input.tasks.filter((t) => t.status === "running" || (t.endedAt !== undefined && input.now - t.endedAt < ttl));
+	// Only background work: a bash command the agent is still waiting on (attached) is not.
+	const tasks = input.tasks.filter((t) => !t.attached && (t.status === "running" || (t.endedAt !== undefined && input.now - t.endedAt < ttl)));
 	if (!tasks.length) return undefined;
 
 	const rows: CardRow[] = [];
@@ -105,15 +109,16 @@ export function buildBgCard(input: BgCardInput): CardModel | undefined {
 		const age = formatDuration((t.endedAt ?? input.now) - t.startedAt);
 		// Ids are internal: show the label, else the command itself.
 		const command = t.command.split("\n")[0].trim();
-		const name = t.label !== t.id && !t.label.startsWith("bash · ") ? t.label : command;
+		const label = t.label !== t.id && !t.label.startsWith("bash · ") ? t.label : command;
+		const name = label.length > NAME_MAX ? `${label.slice(0, NAME_MAX - 1)}…` : label;
+		// Time and deadline first, so a long command never pushes them off the row.
 		if (t.status === "running") {
 			const last = input.lastLines?.get(t.id);
-			// Say what the row is: a command the agent waits on (attached) or background work.
-			const kind = t.attached ? `$ comando en curso · ${command}` : `⏵ en segundo plano · ${name}`;
-			rows.push({ text: `${kind} · ${age}${last ? ` · ${last}` : ""}` });
+			const time = t.timeoutMs ? `${age} de ${formatDuration(t.timeoutMs)}` : age;
+			rows.push({ text: `⏵ ${time} · ${name}${last ? ` · ${last}` : ""}` });
 		} else {
 			const o = taskOutcome(t);
-			rows.push({ text: `${o.mark} ${name} · ${o.text} · ${age}`, tone: o.tone });
+			rows.push({ text: `${o.mark} ${o.text} · ${age} · ${name}`, tone: o.tone });
 			if (o.tone === "error") tone.raise("warning");
 		}
 	}

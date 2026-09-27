@@ -123,10 +123,9 @@ A dispatched worker loses the coordinator tools as soon as its preamble arrives,
 ### UI
 
 - **Cards.** Two separate cards sit above the editor. Each appears only when it has something to show, and both are in Spanish.
-  - **"⏵ Segundo plano"** lists commands. Each row says in words what it is, and shows the label or the command, never an internal `bgN` id:
-    - `⏵ en segundo plano · infra verify.sh · 3m21s`: a `bg_run` task, with its last output line;
-    - `$ comando en curso · sleep 170; date · 32s`: a bash command the worker is waiting on, which moves to the background if its coordinator writes;
-    - finished ones show a plain outcome ("terminó bien", "falló (código 7)", "encontró el patrón"…).
+  - **"⏵ Segundo plano"** lists background work only: `bg_run` tasks, plus a worker's bash command once it has moved to the background. A command the agent is still waiting on does not appear, and neither does an internal `bgN` id. The time comes first, so a long command never hides it:
+    - `⏵ 3m21s de 30m00s · infra verify.sh · ok 12/40`: running for 3m21s of its 30-minute deadline, then its label or command (clipped) and its last output line;
+    - `✔ terminó bien · 20s · prueba idle`: finished ones lead with a plain outcome ("terminó bien", "falló (código 7)", "encontró el patrón", "tiempo agotado"…).
   - **"⇄ Orca · <objective>"** names the Run by its objective and shows one entry per open agent.
     - First line: `agente ·`, the task title, its state ("trabajando", "esperando", "parado 5m sin terminar", "esperando una respuesta en su terminal", "terminó · falta cerrarlo"), the time since dispatch, the agent and the model. When no `--model` was passed, a Pi worker shows the `defaultModel` from its project settings, falling back to the personal ones, marked "(por defecto)". No model is guessed for a worker dispatched into an existing terminal (`--terminal`).
     - Second line, dimmed (`↳`): what the worker is doing now, refreshed every 10 s from the tail of its terminal (`worker-read`, sanitized and redacted). It shows a background task it is waiting on, else its last tool action (`$ command`, `read file`, `bg_run · …`), else the last line it wrote. A tool call whose arguments are still being written (`write ...`, `$ ...`) is described in words, followed by what the agent said just before: `escribiendo un fichero · Writing the report now.`

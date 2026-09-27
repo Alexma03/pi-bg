@@ -182,7 +182,7 @@ export default function piBg(pi: ExtensionAPI) {
 		const ctx = ctxRef;
 		if (!ctx?.hasUI) return;
 		try {
-			ctx.ui.setStatus(STATUS_KEY, bgStatus(manager?.running().length ?? 0));
+			ctx.ui.setStatus(STATUS_KEY, bgStatus(manager?.running().filter((t) => !t.attached).length ?? 0));
 			ctx.ui.setStatus(ORCA_STATUS_KEY, bridge ? orcaStatus(bridge.state, now()) : undefined);
 		} catch {
 			/* UI may be gone during shutdown */
@@ -498,7 +498,7 @@ export default function piBg(pi: ExtensionAPI) {
 
 	pi.on("input", (event) => {
 		// pi-bg's own wake prompt is not new direction for the worker.
-		if (event.text?.startsWith(WAKE_PREFIX)) return undefined;
+		if (event.source === "extension" && event.text?.startsWith(WAKE_PREFIX)) return undefined;
 		if (inOrcaTerminal && !gentleChild) {
 			const before = worker.identity?.dispatchId;
 			worker = onInput(worker, event.text ?? "");

@@ -24,7 +24,9 @@ test("a running background task in the worker's own card wins", () => {
 		...CHROME_END,
 	];
 	assert.equal(lastActivity(tail), "⏵ espera 3 min · 1m30s");
-	// Workers still on the old card format.
+	assert.equal(lastActivity(["│ ⏵ 1m30s de 5m00s · espera 3 min · ok 3/9 │", ...CHROME_END]), "⏵ 1m30s de 5m00s · espera 3 min · ok 3/9");
+	assert.equal(lastActivity(["│ ✔ terminó bien · 20s · espera │", " Listo.", ...CHROME_END]), "Listo.", "a finished task is not waited on");
+	// Workers still on older card formats.
 	assert.equal(lastActivity(["│ ▸ bg1 espera 3 min · 1m30s │"]), "⏵ espera 3 min · 1m30s");
 });
 

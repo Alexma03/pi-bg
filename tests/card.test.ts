@@ -36,9 +36,23 @@ test("no cards when nothing runs and the bridge is off", () => {
 	assert.equal(buildOrcaCard({ now: 0, orca: initialState() }), undefined);
 });
 
-test("a command the agent is waiting on reads as a command in progress, without 'bash ·' or its id", () => {
-	const card = buildBgCard({ now: 32_000, tasks: [task("bg63", { attached: true, label: "bash · sleep 170; date -u +%T", command: "sleep 170; date -u +%T" })] });
-	assert.deepEqual(card!.rows.map((r) => r.text), ["$ comando en curso · sleep 170; date -u +%T · 32s"]);
+test("a command the agent is waiting on is not background work; once moved to the background it is", () => {
+	// Only background work belongs in this card: a command the agent is waiting on is not.
+	assert.equal(buildBgCard({ now: 32_000, tasks: [task("bg63", { attached: true, label: "bash · sleep 170; date -u +%T", command: "sleep 170; date -u +%T" })] }), undefined);
+	// Once it moves to the background (its coordinator wrote), it is background work.
+	const moved = buildBgCard({ now: 32_000, tasks: [task("bg63", { label: "bash · sleep 170; date -u +%T", command: "sleep 170; date -u +%T", timeoutMs: 180_000 })] });
+	assert.deepEqual(moved!.rows.map((r) => r.text), ["⏵ 32s de 3m00s · sleep 170; date -u +%T"]);
+});
+
+test("time and deadline come first, so a long command never hides them", () => {
+	const long = `cd /home/alex/Projects/financial-hub/financial-hub-serverful && ${"pnpm --filter @fh/market-api test -- --run ".repeat(4)}`;
+	const card = buildBgCard({ now: 200_000, tasks: [task("bg1", { command: long, timeoutMs: 1_800_000 }), task("bg2", { command: long, status: "exited", exitCode: 0, endedAt: 199_000 })] });
+	const [running, done] = card!.rows.map((r) => r.text);
+	assert.ok(running.startsWith("⏵ 3m20s de 30m00s · cd /home/alex/"), running);
+	assert.ok(done.startsWith("✔ terminó bien · 3m19s · cd /home/alex/"), done);
+	assert.ok(running.length <= 110 && done.length <= 110, "the command is clipped");
+	const lines = renderCardLines(card!, plainTheme, 60);
+	assert.match(lines[1], /3m20s de 30m00s/, "visible even on a narrow terminal");
 });
 
 test("background card shows only tasks, in Spanish; Orca never leaks into it", () => {
@@ -60,12 +74,12 @@ test("background card shows only tasks, in Spanish; Orca never leaks into it", (
 	assert.equal(card.title, "Segundo plano · 1 en marcha");
 	const text = card.rows.map((r) => r.text).join("\n");
 	// Rows say what they are in words and never show internal ids.
-	assert.match(text, /⏵ en segundo plano · verify · 5m00s · ok 12\/40/);
-	assert.match(text, /✖ sleep 1 · falló \(código 2\)/);
-	assert.match(text, /✔ sleep 1 · terminó bien/);
-	assert.match(text, /✔ sleep 1 · encontró el patrón/);
-	assert.match(text, /✖ sleep 1 · tiempo agotado/);
-	assert.match(text, /■ sleep 1 · cancelada/);
+	assert.match(text, /⏵ 5m00s · verify · ok 12\/40/, "no deadline known: just the time");
+	assert.match(text, /✖ falló \(código 2\) · 4m59s · sleep 1/);
+	assert.match(text, /✔ terminó bien · 4m59s · sleep 1/);
+	assert.match(text, /✔ encontró el patrón · 4m59s · sleep 1/);
+	assert.match(text, /✖ tiempo agotado · 4m59s · sleep 1/);
+	assert.match(text, /■ cancelada · 4m59s · sleep 1/);
 	assert.doesNotMatch(text, /\bbg\d/);
 	assert.doesNotMatch(text, /orca|fleet|agente/);
 	const lines = renderCardLines(card, plainTheme, 60);
