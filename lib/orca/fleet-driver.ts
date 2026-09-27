@@ -4,7 +4,10 @@
 
 import { extractJson, type CliCapture } from "./cli.ts";
 import { runOrcaCli } from "./exec.ts";
-import { addWatch, DEFAULT_FLEET_CONFIG, initialFleet, seedSeen, parseTasks, parseWorkerPage, updateFleet, type FleetConfig, type FleetEvent, type FleetState, type TaskRow, type Watch, type WorkerRow } from "./fleet.ts";
+import { lastActivity } from "./activity.ts";
+import { redact } from "../redact.ts";
+import { clip, sanitizeTerminal } from "../text.ts";
+import { addWatch, isInProgress, DEFAULT_FLEET_CONFIG, initialFleet, seedSeen, parseTasks, parseWorkerPage, parseWorkerShow, updateFleet, type WorkerDetail, type FleetConfig, type FleetEvent, type FleetState, type TaskRow, type Watch, type WorkerRow } from "./fleet.ts";
 
 export interface FleetDeps {
 	orcaBin: string;
@@ -17,6 +20,8 @@ export interface FleetDeps {
 	config?: FleetConfig;
 	/** Maximum worker-list pages per poll (100 rows each). */
 	maxPages?: number;
+	/** How often the live activity line of open workers is refreshed; 0 disables it. */
+	activityMs?: number;
 }
 
 type Doc = { ok?: unknown; result?: unknown; error?: { code?: unknown } };
@@ -34,6 +39,14 @@ export class FleetWatch {
 	incomplete = false;
 	lastPollAt: number | null = null;
 	lastError: string | null = null;
+	/** Run objective, for display ("" until read). */
+	objective = "";
+	/** Agent, model and start time per dispatch; immutable, so read once. */
+	readonly details = new Map<string, WorkerDetail>();
+	/** Latest activity line per open dispatch, from its terminal tail (sanitized, redacted). */
+	readonly activity = new Map<string, string>();
+	private activityTimer: ReturnType<typeof setInterval> | undefined;
+	private readingActivity = false;
 	private timer: ReturnType<typeof setTimeout> | undefined;
 	private polling = false;
 	private disposed = false;
@@ -51,18 +64,28 @@ export class FleetWatch {
 			// carry over. The first Run of a session keeps watches restored at start.
 			this.state = this.runId === null ? { ...initialFleet(), watches: this.state.watches } : initialFleet();
 			this.runId = runId;
+			this.objective = "";
+			this.details.clear();
+			this.activity.clear();
 			if (this.pendingSeed?.runId === runId) {
 				this.state = seedSeen(this.state, this.pendingSeed.seen);
 				this.pendingSeed = undefined;
 			}
 		}
 		this.schedule(0);
+		const every = this.deps.activityMs ?? 10_000;
+		if (every > 0 && !this.activityTimer) {
+			this.activityTimer = setInterval(() => void this.readActivity(), every);
+			this.activityTimer.unref?.();
+		}
 	}
 
 	stop(): void {
 		this.runId = null;
 		if (this.timer) clearTimeout(this.timer);
 		this.timer = undefined;
+		if (this.activityTimer) clearInterval(this.activityTimer);
+		this.activityTimer = undefined;
 	}
 
 	dispose(): void {
@@ -109,6 +132,7 @@ export class FleetWatch {
 				// An incomplete inventory must not claim the fleet is idle.
 				const usable = this.incomplete ? events.filter((e) => e.kind !== "fleet_idle" && e.kind !== "ready_tasks") : events;
 				if (usable.length) this.deps.onEvents(usable, this.state, runId);
+				await this.readDisplay(runId, rows);
 			}
 		} finally {
 			this.polling = false;
@@ -141,6 +165,51 @@ export class FleetWatch {
 		this.incomplete = true;
 		this.lastError = `fleet larger than ${maxPages * 100} workers; showing the newest`;
 		return rows;
+	}
+
+	/** Refresh the activity line of open workers (display only; bounded). */
+	async readActivity(): Promise<void> {
+		const runId = this.runId;
+		if (!runId || this.disposed || this.readingActivity) return;
+		this.readingActivity = true;
+		try {
+			const open = [...this.state.workers.values()].filter((t) => isInProgress(t.row)).slice(0, 6);
+			for (const id of [...this.activity.keys()]) if (!open.some((t) => t.row.dispatchId === id)) this.activity.delete(id);
+			let changed = false;
+			for (const t of open) {
+				if (this.runId !== runId || this.disposed) return;
+				const result = resultOf(await runOrcaCli(this.deps.orcaBin, ["orchestration", "worker-read", "--dispatch", t.row.dispatchId, "--limit", "40", "--json"], { cwd: this.deps.cwd, env: this.deps.env }));
+				const terminal = result && typeof result.terminal === "object" && result.terminal ? (result.terminal as Record<string, unknown>) : undefined;
+				const tail = Array.isArray(terminal?.tail) ? terminal.tail.filter((l): l is string => typeof l === "string").map(sanitizeTerminal) : undefined;
+				if (!tail) continue;
+				const line = lastActivity(tail);
+				const text = line ? clip(redact(line), 200) : "";
+				if (text && this.activity.get(t.row.dispatchId) !== text) {
+					this.activity.set(t.row.dispatchId, text);
+					changed = true;
+				}
+			}
+			if (changed) this.deps.onChange();
+		} finally {
+			this.readingActivity = false;
+		}
+	}
+
+	/** Display-only reads; failures just leave the fields empty. */
+	private async readDisplay(runId: string, rows: WorkerRow[]): Promise<void> {
+		const opts = { cwd: this.deps.cwd, env: this.deps.env };
+		if (!this.objective) {
+			const result = resultOf(await runOrcaCli(this.deps.orcaBin, ["orchestration", "run-show", "--id", runId, "--json"], opts));
+			const run = result && typeof result.run === "object" && result.run ? (result.run as Record<string, unknown>) : undefined;
+			if (typeof run?.objective === "string") this.objective = run.objective;
+		}
+		// Bounded: a few new dispatches per poll, open ones first.
+		const missing = rows.filter((r) => !this.details.has(r.dispatchId) && (isInProgress(r) || r.nextAction === "release")).slice(0, 4);
+		for (const r of missing) {
+			if (this.runId !== runId || this.disposed) return;
+			const result = resultOf(await runOrcaCli(this.deps.orcaBin, ["orchestration", "worker-show", "--dispatch", r.dispatchId, "--json"], opts));
+			if (result) this.details.set(r.dispatchId, parseWorkerShow(result));
+		}
 	}
 
 	private async readTasks(runId: string): Promise<TaskRow[] | undefined> {

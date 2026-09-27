@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { addWatch, initialFleet, parseTasks, parseWorkerPage, readyTasks, summarize, summaryLine, updateFleet, type FleetState, type TaskRow, type WorkerRow } from "../lib/orca/fleet.ts";
+import { addWatch, initialFleet, parseTasks, parseWorkerShow, parseOrcaTime, parseWorkerPage, readyTasks, summarize, summaryLine, updateFleet, type FleetState, type TaskRow, type WorkerRow } from "../lib/orca/fleet.ts";
 
 const MIN = 60_000;
 const row = (id: string, extra: Partial<WorkerRow> = {}): WorkerRow => ({
@@ -23,7 +23,7 @@ const row = (id: string, extra: Partial<WorkerRow> = {}): WorkerRow => ({
 	provider: "pi",
 	...extra,
 });
-const task = (id: string, extra: Partial<TaskRow> = {}): TaskRow => ({ id, title: id.toUpperCase(), status: "dispatched", deps: [], parentId: null, ...extra });
+const task = (id: string, extra: Partial<TaskRow> = {}): TaskRow => ({ id, title: id.toUpperCase(), spec: "", status: "dispatched", deps: [], parentId: null, ...extra });
 
 function poll(state: FleetState, rows: WorkerRow[], now: number, tasks?: TaskRow[]) {
 	return updateFleet(state, rows, tasks, now);
@@ -53,8 +53,19 @@ test("parses worker-list pages and task-list rows", () => {
 	assert.deepEqual(page.rows[0].attention, ["input"]);
 	assert.equal(page.hasMore, true);
 	assert.equal(page.nextCursor, "ctx_1");
-	const tasks = parseTasks({ tasks: [{ id: "task_1", display_name: "A0", status: "pending", deps: '["task_0"]', parent_id: null }] });
-	assert.deepEqual(tasks, [{ id: "task_1", title: "A0", status: "pending", deps: ["task_0"], parentId: null }]);
+	const tasks = parseTasks({ tasks: [{ id: "task_1", display_name: "A0", spec: "Do A0", status: "pending", deps: '["task_0"]', parent_id: null }] });
+	assert.deepEqual(tasks, [{ id: "task_1", title: "A0", spec: "Do A0", status: "pending", deps: ["task_0"], parentId: null }]);
+});
+
+test("worker-show gives agent, model and dispatch time (Orca UTC without zone)", () => {
+	const detail = parseWorkerShow({
+		dispatch: { dispatchedAt: "2026-09-27 16:15:16", createdAt: "2026-09-27 16:15:10" },
+		worker: { startOptions: { agent: "pi", launch: { requested: { agent: "pi", model: null }, effective: { agent: "pi", model: "gpt-6-sol", effort: "high" } } } },
+	});
+	assert.deepEqual(detail, { agent: "pi", model: "gpt-6-sol", effort: "high", startedAt: Date.parse("2026-09-27T16:15:16Z") });
+	assert.equal(parseOrcaTime("2026-09-27T16:16:43.690Z"), Date.parse("2026-09-27T16:16:43.690Z"));
+	assert.equal(parseOrcaTime(null), null);
+	assert.deepEqual(parseWorkerShow({}), { agent: "", model: "", effort: "", startedAt: null });
 });
 
 test("a worker that ends its turn without worker_done is reported once after 3 minutes", () => {

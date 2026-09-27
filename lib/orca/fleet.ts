@@ -35,6 +35,8 @@ export interface WorkerRow {
 export interface TaskRow {
 	id: string;
 	title: string;
+	/** What the worker was asked to do (`--spec`). */
+	spec: string;
 	status: string;
 	deps: string[];
 	parentId: string | null;
@@ -79,6 +81,39 @@ export function parseWorkerRow(raw: unknown): WorkerRow | undefined {
 	};
 }
 
+/** Display-only facts about one Dispatch, read once from `worker-show`. */
+export interface WorkerDetail {
+	agent: string;
+	/** Model passed with `--model`; empty when the agent uses its own default. */
+	model: string;
+	effort: string;
+	/** When the worker was dispatched (ms epoch), if known. */
+	startedAt: number | null;
+}
+
+/** Orca prints SQLite UTC timestamps without a zone ("2026-09-27 16:15:16"). */
+export function parseOrcaTime(v: unknown): number | null {
+	if (typeof v !== "string" || !v) return null;
+	const iso = /[zZ]|[+-]\d\d:?\d\d$/.test(v) ? v : `${v.replace(" ", "T")}Z`;
+	const ms = Date.parse(iso);
+	return Number.isFinite(ms) ? ms : null;
+}
+
+export function parseWorkerShow(result: Record<string, unknown>): WorkerDetail {
+	const worker = rec(result.worker);
+	const dispatch = rec(result.dispatch);
+	const opts = rec(worker.startOptions);
+	const launch = rec(opts.launch);
+	const eff = rec(launch.effective);
+	const req = rec(launch.requested);
+	return {
+		agent: s(eff.agent) || s(req.agent) || s(opts.agent),
+		model: s(eff.model) || s(req.model),
+		effort: s(eff.effort) || s(req.effort),
+		startedAt: parseOrcaTime(dispatch.dispatchedAt) ?? parseOrcaTime(dispatch.createdAt) ?? parseOrcaTime(worker.createdAt),
+	};
+}
+
 export function parseWorkerPage(result: Record<string, unknown>): WorkerPage {
 	const workers = Array.isArray(result.workers) ? result.workers : [];
 	const page = rec(result.page);
@@ -101,7 +136,7 @@ export function parseTasks(result: Record<string, unknown>): TaskRow[] {
 			} catch {
 				deps = [];
 			}
-			return { id: s(t.id), title: s(t.display_name) || s(t.task_title), status: s(t.status), deps, parentId: s(t.parent_id) || null };
+			return { id: s(t.id), title: s(t.display_name) || s(t.task_title), spec: s(t.spec), status: s(t.status), deps, parentId: s(t.parent_id) || null };
 		})
 		.filter((t) => t.id);
 }

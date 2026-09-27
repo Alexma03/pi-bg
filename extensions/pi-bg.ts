@@ -8,6 +8,7 @@
 // sees the message before its next model call. `followUp` is avoided on
 // purpose (it waits for the whole run to stop).
 
+import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -22,11 +23,11 @@ import { BLOCK_REASON, classifyOrcaCommand } from "../lib/orca/guard.ts";
 import { acceptedByOrca, initialWorker, onInput, onLifecycleResult, reminderFor, type WorkerState } from "../lib/orca/worker.ts";
 import { redact } from "../lib/redact.ts";
 import { stateBlock } from "../lib/state-block.ts";
-import { footerText } from "../lib/status.ts";
+import { bgStatus, orcaStatus } from "../lib/status.ts";
 import { TaskManager, type TaskSnapshot } from "../lib/tasks/manager.ts";
 import { formatNotices, type TaskNotice } from "../lib/tasks/notice.ts";
 import { clip, formatDuration, sanitizeTerminal } from "../lib/text.ts";
-import { buildCard, renderCardLines } from "../lib/ui/card.ts";
+import { buildBgCard, buildOrcaCard, renderCardLines, type CardModel } from "../lib/ui/card.ts";
 import { deliveryView, messageFacts, type MessageFact } from "../lib/ui/delivery-view.ts";
 import { createWakeBudget, takeWake } from "../lib/wake-budget.ts";
 
@@ -37,7 +38,9 @@ const WORKER_MESSAGE = "pi-bg-worker";
 const WATCH_ENTRY = "pi-bg-watch";
 const FLEET_SEEN_ENTRY = "pi-bg-fleet-seen";
 const STATUS_KEY = "pi-bg";
+const ORCA_STATUS_KEY = "pi-bg-orca";
 const CARD_KEY = "pi-bg-card";
+const ORCA_CARD_KEY = "pi-bg-orca-card";
 const NOTICE_BATCH_MS = 400;
 const FLEET_BATCH_MS = 5_000;
 const WATCH_DEFAULT_TIMEOUT_S = 30 * 60;
@@ -47,6 +50,19 @@ const ORCA_TOOLS = ["orca_ack", "orca_inbox", "orca_workers", "orca_watch"];
 function stateDir(env: NodeJS.ProcessEnv): string {
 	if (env.PI_BG_STATE_DIR) return env.PI_BG_STATE_DIR;
 	return join(env.XDG_STATE_HOME || join(homedir(), ".local", "state"), "pi-bg");
+}
+
+/** The model a Pi worker starts with when no `--model` is given: project settings, then personal. */
+function piDefaultModel(cwd: string): string | undefined {
+	for (const file of [join(cwd, ".pi", "settings.json"), join(homedir(), ".pi", "agent", "settings.json")]) {
+		try {
+			const settings = JSON.parse(readFileSync(file, "utf8")) as { defaultModel?: unknown };
+			if (typeof settings.defaultModel === "string" && settings.defaultModel) return settings.defaultModel;
+		} catch {
+			/* missing or unreadable */
+		}
+	}
+	return undefined;
 }
 
 const clean = (text: string): string => redact(sanitizeTerminal(text));
@@ -133,7 +149,8 @@ export default function piBg(pi: ExtensionAPI) {
 		const ctx = ctxRef;
 		if (!ctx?.hasUI) return;
 		try {
-			ctx.ui.setStatus(STATUS_KEY, footerText(manager?.running().length ?? 0, bridge?.state, now()));
+			ctx.ui.setStatus(STATUS_KEY, bgStatus(manager?.running().length ?? 0));
+			ctx.ui.setStatus(ORCA_STATUS_KEY, bridge ? orcaStatus(bridge.state, now()) : undefined);
 		} catch {
 			/* UI may be gone during shutdown */
 		}
@@ -300,7 +317,9 @@ export default function piBg(pi: ExtensionAPI) {
 		exitHook = undefined;
 		try {
 			ctxRef?.ui.setStatus(STATUS_KEY, undefined);
+			ctxRef?.ui.setStatus(ORCA_STATUS_KEY, undefined);
 			ctxRef?.ui.setWidget(CARD_KEY, undefined);
+			ctxRef?.ui.setWidget(ORCA_CARD_KEY, undefined);
 		} catch {
 			/* ignore */
 		}
@@ -340,26 +359,45 @@ export default function piBg(pi: ExtensionAPI) {
 	function installCard(ctx: ExtensionContext) {
 		if (cardMode === "off") {
 			ctx.ui.setWidget(CARD_KEY, undefined);
+			ctx.ui.setWidget(ORCA_CARD_KEY, undefined);
 			return;
 		}
-		ctx.ui.setWidget(CARD_KEY, (tui, theme) => {
-			cardTui = tui;
-			return {
-				render(width: number) {
-					const m = manager;
-					if (!m) return [];
-					const tasks = m.list();
-					const lastLinesMap = new Map<string, string>();
-					for (const t of tasks) {
-						const line = t.status === "running" ? m.lastLine(t.id) : undefined;
-						if (line) lastLinesMap.set(t.id, line);
-					}
-					const model = buildCard({ now: now(), tasks, lastLines: lastLinesMap, orca: bridge?.state, fleet: fleet?.state, fleetIncomplete: fleet?.incomplete, collapsed: cardMode === "collapsed", maxRows: 8 });
-					return model ? [...renderCardLines(model, theme, width), ""] : [];
-				},
-				invalidate() {},
-			};
+		const widget = (key: string, build: () => CardModel | undefined) =>
+			ctx.ui.setWidget(key, (tui, theme) => {
+				cardTui = tui;
+				return {
+					render(width: number) {
+						const model = build();
+						return model ? [...renderCardLines(model, theme, width), ""] : [];
+					},
+					invalidate() {},
+				};
+			});
+		widget(CARD_KEY, () => {
+			const m = manager;
+			if (!m) return undefined;
+			const tasks = m.list();
+			const lastLinesMap = new Map<string, string>();
+			for (const t of tasks) {
+				const line = t.status === "running" ? m.lastLine(t.id) : undefined;
+				if (line) lastLinesMap.set(t.id, line);
+			}
+			return buildBgCard({ now: now(), tasks, lastLines: lastLinesMap, collapsed: cardMode === "collapsed", maxRows: 8 });
 		});
+		const piModel = piDefaultModel(ctx.cwd);
+		widget(ORCA_CARD_KEY, () =>
+			buildOrcaCard({
+				now: now(),
+				orca: bridge?.state,
+				fleet: fleet?.state,
+				fleetIncomplete: fleet?.incomplete,
+				objective: fleet?.objective,
+				details: fleet?.details,
+				activity: fleet?.activity,
+				defaultModel: (agent) => (agent === "pi" ? piModel : undefined),
+				collapsed: cardMode === "collapsed",
+			}),
+		);
 	}
 
 	// ---- Orca worker side: preamble, lifecycle results, reminder -----------

@@ -68,7 +68,7 @@ The bridge is active only in an interactive Pi session inside an Orca terminal (
   - `/orca-watch on` and `/orca-watch off` switch the bridge.
   - `/orca-watch <run_id>` consumes that Run explicitly with `--run`.
 
-The footer segment reads `⏵ 2 bg · orca ◉ run_8da5` while waiting, `orca ◆ ack pending 2m05s` while a delivery is pending, and `orca ⚠ retry 30s` during backoff.
+The footer shows `⏵ 2 tareas` for tasks and a separate Orca segment. The Orca segment reads `orca ◉ escuchando` while waiting, `orca ◆ sin procesar 2m05s` while a delivery is pending, and `orca ⚠ reintento 30s` during backoff.
 
 ### Fleet watch (coordinator)
 
@@ -102,7 +102,15 @@ The coordinator tools (`orca_ack`, `orca_inbox`, `orca_workers`, `orca_watch`) a
 
 ### UI
 
-- **Card.** A "Background · Orca" card above the editor shows running tasks with their last line, the bridge state and the open workers. It appears only when there is something to show. `/bg card on|off|collapse` controls it.
+- **Cards.** Two separate cards sit above the editor. Each appears only when it has something to show, and both are in Spanish.
+  - **"⏵ Segundo plano"** lists generic `bg_run` tasks, with the last line of each running task and a plain outcome ("terminó bien", "falló (código 7)", "encontró el patrón"…).
+  - **"⇄ Orca · <objective>"** names the Run by its objective and shows one entry per open agent.
+    - First line: the task title, its state ("trabajando", "esperando", "parado 5m sin terminar", "esperando una respuesta en su terminal", "terminó · falta cerrarlo"), the time since dispatch, the agent and the model. When no `--model` was passed, a Pi worker shows the `defaultModel` from its project settings, falling back to the personal ones, marked "(por defecto)".
+    - Second line, dimmed (`↳`): what the worker is doing now, refreshed every 10 s from the tail of its terminal (`worker-read`, sanitized and redacted). It shows a background task it is waiting on, else its last tool action (`$ command`, `read file`, `bg_run · …`), else the last line it wrote.
+    - Agent, model and start time come from one `worker-show` per dispatch; the objective comes from `run-show`. All these reads are read-only; the first two are cached.
+    - The card is hidden while the session orchestrates no agent and the bridge is just listening.
+    - A bridge row appears only when something needs attention: unprocessed messages, a retry, or a lost Run.
+  - `/bg card on|off|collapse` controls both cards. The footer also has one segment for each (`⏵ 2 tareas`, `orca ◉ escuchando`).
 - **Delivery messages.** They render one glyph per message type (`worker_done` ✔/✖ by outcome, `question` ?, `escalation` ⚠).
 - **Tool results.** They are one line unless expanded.
 - **Live state.** Wake messages end with a short live-state block (running tasks, pending delivery, fleet summary). It is not added to the system prompt, which keeps the prompt cache stable.

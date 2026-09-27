@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { generateKeyPairSync } from "node:crypto";
 import { backoffDelay, TRANSPORT_BACKOFF } from "../lib/backoff.ts";
 import { redact } from "../lib/redact.ts";
-import { footerText } from "../lib/status.ts";
+import { bgStatus, orcaStatus } from "../lib/status.ts";
 import { initialState } from "../lib/orca/machine.ts";
 import { clip, formatDuration, lastLines, sanitizeTerminal } from "../lib/text.ts";
 import { formatNotice, formatNotices, type TaskNotice } from "../lib/tasks/notice.ts";
@@ -106,13 +106,16 @@ test("task notices are compact and name the log", () => {
 	assert.match(formatNotice(notice({ lines: ["password=supersecret1"] })), /\[REDACTED\]/);
 });
 
-test("footer text combines tasks and bridge state", () => {
-	assert.equal(footerText(0, undefined, 0), undefined);
-	assert.equal(footerText(2, initialState(), 0), "⏵ 2 bg");
+test("footer segments are separate for tasks and the bridge, in Spanish", () => {
+	assert.equal(bgStatus(0), undefined);
+	assert.equal(bgStatus(1), "⏵ 1 tarea");
+	assert.equal(bgStatus(2), "⏵ 2 tareas");
+	assert.equal(orcaStatus(initialState(), 0), undefined);
 	const waiting = { ...initialState(), phase: "waiting" as const, runId: "run_8da5785a70be" };
-	assert.equal(footerText(0, waiting, 0), "orca ◉ run_8da5");
-	const pending = { ...waiting, phase: "pending" as const, pendingSince: 0 };
-	assert.equal(footerText(1, pending, 125_000), "⏵ 1 bg · orca ◆ ack pending 2m05s run_8da5");
+	assert.equal(orcaStatus(waiting, 0), "orca ◉ escuchando");
+	assert.equal(orcaStatus({ ...waiting, phase: "pending" as const, pendingSince: 0 }, 125_000), "orca ◆ sin procesar 2m05s");
+	assert.equal(orcaStatus({ ...waiting, phase: "backoff" as const, reason: "another waiter exists", retryAt: 30_000 }, 0), "orca ⚠ otra sesión leyendo · reintento 30s");
+	assert.equal(orcaStatus({ ...waiting, phase: "fenced" as const }, 0), "orca ✕ ya no coordina");
 });
 
 test("redact hides multiline PEM keys and orphaned PEM body lines", () => {
