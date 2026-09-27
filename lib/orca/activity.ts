@@ -54,10 +54,11 @@ function tidy(text: string): string {
 export function lastActivity(tail: string[]): string | undefined {
 	// 1. Its own pi-bg card: a foreground command it runs ("$", with its live
 	//    last output line) or a background task it waits on ("▸").
+	// The old format ("$ bgN bash · …", "▸ bgN …") is still read for older workers.
 	for (let i = tail.length - 1; i >= 0; i--) {
-		const fg = /^│\s*\$\s+bg\d+ bash · (.*?)\s*│\s*$/.exec(tail[i]);
+		const fg = /^│\s*\$\s+(?:comando en curso|bg\d+ bash) · (.*?)\s*│\s*$/.exec(tail[i]);
 		if (fg && fg[1]) return `$ ${tidy(fg[1])}`;
-		const m = /^│\s*▸\s+(.*?)\s*│\s*$/.exec(tail[i]);
+		const m = /^│\s*(?:⏵ en segundo plano ·|▸\s+bg\d+)\s+(.*?)\s*│\s*$/.exec(tail[i]);
 		if (m && m[1]) return `⏵ ${tidy(m[1])}`;
 	}
 	const lines = withoutPiFooter(tail).filter((l) => !isChrome(l));

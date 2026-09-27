@@ -19,11 +19,13 @@ test("a running background task in the worker's own card wins", () => {
 		' Started bg1 "espera 3 min" (pid 3502230). (+2 lines)',
 		" I'll wait for the background notice to come in and then wrap up my turn.",
 		"╭─ ⏵ Segundo plano · 1 en marcha ─────────╮",
-		"│ ▸ bg1 espera 3 min · 1m30s               │",
+		"│ ⏵ en segundo plano · espera 3 min · 1m30s │",
 		"╰──────────────────────────────────────────╯",
 		...CHROME_END,
 	];
-	assert.equal(lastActivity(tail), "⏵ bg1 espera 3 min · 1m30s");
+	assert.equal(lastActivity(tail), "⏵ espera 3 min · 1m30s");
+	// Workers still on the old card format.
+	assert.equal(lastActivity(["│ ▸ bg1 espera 3 min · 1m30s │"]), "⏵ espera 3 min · 1m30s");
 });
 
 test("otherwise the last tool action: bash, file tools, named tools", () => {

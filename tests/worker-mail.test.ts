@@ -49,7 +49,8 @@ test("attach: orca lifecycle commands stay in the foreground; the wrapper is quo
 });
 
 test("activity: an attached foreground command in the worker card is not 'waiting on background'", () => {
-	const tail = ["$ # pi-bg bg4 (moves to the background if your coordinator writes): pnpm test", "╭─ ⏵ Segundo plano · 1 en marcha ──╮", "│ $ bg4 bash · pnpm test · 2m05s · ok 12/40 │", "╰──────────────────────────────────╯"];
+	const tail = ["$ # pi-bg bg4 (moves to the background if your coordinator writes): pnpm test", "╭─ ⏵ Segundo plano · 1 en marcha ──╮", "│ $ comando en curso · pnpm test · 2m05s · ok 12/40 │", "╰──────────────────────────────────╯"];
 	assert.equal(lastActivity(tail), "$ pnpm test · 2m05s · ok 12/40");
+	assert.equal(lastActivity(["│ $ bg4 bash · pnpm test · 2m05s │"]), "$ pnpm test · 2m05s", "old card format");
 	assert.equal(lastActivity(["$ # pi-bg bg4 (moves to the background if your coordinator writes): pnpm lint", "ok"]), "$ pnpm lint");
 });

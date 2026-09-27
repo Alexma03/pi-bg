@@ -36,6 +36,11 @@ test("no cards when nothing runs and the bridge is off", () => {
 	assert.equal(buildOrcaCard({ now: 0, orca: initialState() }), undefined);
 });
 
+test("a command the agent is waiting on reads as a command in progress, without 'bash ·' or its id", () => {
+	const card = buildBgCard({ now: 32_000, tasks: [task("bg63", { attached: true, label: "bash · sleep 170; date -u +%T", command: "sleep 170; date -u +%T" })] });
+	assert.deepEqual(card!.rows.map((r) => r.text), ["$ comando en curso · sleep 170; date -u +%T · 32s"]);
+});
+
 test("background card shows only tasks, in Spanish; Orca never leaks into it", () => {
 	const end = 5 * 60_000 - 1000;
 	const card = buildBgCard({
@@ -54,12 +59,14 @@ test("background card shows only tasks, in Spanish; Orca never leaks into it", (
 	assert.equal(card.tone, "warning");
 	assert.equal(card.title, "Segundo plano · 1 en marcha");
 	const text = card.rows.map((r) => r.text).join("\n");
-	assert.match(text, /▸ bg1 verify · 5m00s · ok 12\/40/);
-	assert.match(text, /✖ bg2 · falló \(código 2\)/);
-	assert.match(text, /✔ bg3 · terminó bien/);
-	assert.match(text, /✔ bg4 · encontró el patrón/);
-	assert.match(text, /✖ bg5 · tiempo agotado/);
-	assert.match(text, /■ bg6 · cancelada/);
+	// Rows say what they are in words and never show internal ids.
+	assert.match(text, /⏵ en segundo plano · verify · 5m00s · ok 12\/40/);
+	assert.match(text, /✖ sleep 1 · falló \(código 2\)/);
+	assert.match(text, /✔ sleep 1 · terminó bien/);
+	assert.match(text, /✔ sleep 1 · encontró el patrón/);
+	assert.match(text, /✖ sleep 1 · tiempo agotado/);
+	assert.match(text, /■ sleep 1 · cancelada/);
+	assert.doesNotMatch(text, /\bbg\d/);
 	assert.doesNotMatch(text, /orca|fleet|agente/);
 	const lines = renderCardLines(card, plainTheme, 60);
 	assert.ok(lines[0].startsWith("╭─ ⏵ Segundo plano · 1 en marcha"));
@@ -79,17 +86,17 @@ test("orca card names the Run by objective and shows each agent: task, state, ti
 		["a", { agent: "pi", model: "", effort: "", startedAt: 0, reusedTerminal: false }],
 		["b", { agent: "codex", model: "gpt-6-sol", effort: "high", startedAt: 60_000, reusedTerminal: false }],
 	]);
-	const activity = new Map([["a", { text: "$ pnpm test", since: 0 }], ["b", { text: "⏵ bg1 espera 3 min · 1m30s", since: 0 }]]);
+	const activity = new Map([["a", { text: "$ pnpm test", since: 0 }], ["b", { text: "⏵ espera 3 min · 1m30s", since: 0 }]]);
 	const card = buildOrcaCard({ now: 5 * 60_000, orca, fleet, objective: "Lab visual", details, activity, defaultModel: (agent) => (agent === "pi" ? "claude-opus-5-5" : undefined) });
 	assert.ok(card);
 	assert.equal(card.title, "Orca · Lab visual · 2 agentes");
 	assert.equal(card.tone, "warning");
 	const text = card.rows.map((r) => r.text);
 	assert.deepEqual(text, [
-		"⏸ Revisar docs · parado 5m00s sin terminar · 5m00s · pi · claude-opus-5-5 (por defecto)",
+		"⏸ agente · Revisar docs · parado 5m00s sin terminar · 5m00s · pi · claude-opus-5-5 (por defecto)",
 		"  ↳ $ pnpm test",
-		"▸ Tests · trabajando · 4m00s · codex · gpt-6-sol high",
-		"  ↳ ⏵ bg1 espera 3 min · 1m30s",
+		"◉ agente · Tests · trabajando · 4m00s · codex · gpt-6-sol high",
+		"  ↳ ⏵ espera 3 min · 1m30s",
 	]);
 	assert.doesNotMatch(text.join("\n"), /Lee el README|Corre los tests/, "the launch prompt is not shown");
 	const reused = buildOrcaCard({ now: 5 * 60_000, orca, fleet, objective: "Lab visual", details: new Map([["a", { agent: "", model: "", effort: "", startedAt: 0, reusedTerminal: true }]]), activity, defaultModel: () => "claude-opus-5-5" });
@@ -119,7 +126,7 @@ test("orca card stays while a settled agent still has to be released", () => {
 	const card = buildOrcaCard({ now: 1000, orca, fleet });
 	assert.ok(card);
 	assert.equal(card.title, "Orca · run_x");
-	assert.match(card.rows[0].text, /✔ task_a · terminó · falta cerrarlo/);
+	assert.match(card.rows[0].text, /✔ agente · task_a · terminó · falta cerrarlo/);
 });
 
 test("worker states in plain words", () => {

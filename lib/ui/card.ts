@@ -103,11 +103,14 @@ export function buildBgCard(input: BgCardInput): CardModel | undefined {
 	const tone = toneTracker();
 	for (const t of tasks) {
 		const age = formatDuration((t.endedAt ?? input.now) - t.startedAt);
-		const name = t.label !== t.id ? `${t.id} ${t.label}` : t.id;
+		// Ids are internal: show the label, else the command itself.
+		const command = t.command.split("\n")[0].trim();
+		const name = t.label !== t.id && !t.label.startsWith("bash · ") ? t.label : command;
 		if (t.status === "running") {
 			const last = input.lastLines?.get(t.id);
-			// "$": a foreground command a worker is running (attached); "▸": background work.
-			rows.push({ text: `${t.attached ? "$" : "▸"} ${name} · ${age}${last ? ` · ${last}` : ""}` });
+			// Say what the row is: a command the agent waits on (attached) or background work.
+			const kind = t.attached ? `$ comando en curso · ${command}` : `⏵ en segundo plano · ${name}`;
+			rows.push({ text: `${kind} · ${age}${last ? ` · ${last}` : ""}` });
 		} else {
 			const o = taskOutcome(t);
 			rows.push({ text: `${o.mark} ${name} · ${o.text} · ${age}`, tone: o.tone });
@@ -140,7 +143,7 @@ export function workerLook(r: WorkerRow, activitySince: number, now: number, sta
 	if (r.livenessReason === "stale_status") return { mark: "⏸", state: "sin señal", tone: "warning" };
 	if (r.activity === "working") {
 		const quiet = seen && !seen.text.startsWith("⏵ ") ? now - seen.since : 0;
-		return quiet >= quietMs ? { mark: "⏸", state: `sin cambios ${formatDuration(quiet)}`, tone: "warning" } : { mark: "▸", state: "trabajando" };
+		return quiet >= quietMs ? { mark: "⏸", state: `sin cambios ${formatDuration(quiet)}`, tone: "warning" } : { mark: "◉", state: "trabajando" };
 	}
 	if (r.activity === "done" || r.activity === "idle") {
 		return now - activitySince >= stallMs ? { mark: "⏸", state: `parado ${formatDuration(now - activitySince)} sin terminar`, tone: "warning" } : { mark: "·", state: "esperando" };
@@ -193,7 +196,7 @@ export function buildOrcaCard(input: OrcaCardInput): CardModel | undefined {
 			// A reused terminal runs whatever its owner launched: do not guess.
 			const model = detail?.model || (agent && !detail?.reusedTerminal ? input.defaultModel?.(agent) : undefined);
 			const who = [agent, model ? `${model}${detail?.model ? "" : " (por defecto)"}${detail?.effort ? ` ${detail.effort}` : ""}` : ""].filter(Boolean).join(" · ");
-			rows.push({ text: `${look.mark} ${task?.title || r.taskId} · ${look.state}${elapsed ? ` · ${elapsed}` : ""}${who ? ` · ${who}` : ""}${human}`, ...(look.tone ? { tone: look.tone } : {}) });
+			rows.push({ text: `${look.mark} agente · ${task?.title || r.taskId} · ${look.state}${elapsed ? ` · ${elapsed}` : ""}${who ? ` · ${who}` : ""}${human}`, ...(look.tone ? { tone: look.tone } : {}) });
 			if (seen) rows.push({ text: `  ↳ ${oneLine(seen.text)}`, tone: "muted" });
 		}
 	}
