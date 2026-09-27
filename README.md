@@ -17,6 +17,8 @@ Restart or `/reload` running sessions to pick it up.
 
 ## Background tasks
 
+**Automatic background.** In an interactive session, a `bash` command still running after **10 s** moves to the background by itself. The bash call returns at once saying so, the command keeps running as a pi-bg task, and its ordinary notice arrives when it ends. Its bash `timeout` (or 30 s without one) still applies. Measured before this change: agents spent 348 min in 4 h blocked in bash calls (CI polling loops, deploys), while Orca deliveries waited. Orca lifecycle commands (`orca …`) stay in the foreground. Gentle subagent children and non-interactive runs are left alone. `PI_BG_AUTO_BACKGROUND_S` changes the threshold (`0` turns it off), and `PI_BG_ATTACH=0` turns attaching off entirely.
+
 `bg_run` is for commands that take **10 seconds or more**, or never end on their own (test suites, builds, installs, deploys, CI and log watches). It is also for starting **several such commands in parallel**, one `bg_run` each. Near-instant commands (`cd`, `cat`, `ls`, `grep`, `git status`…) belong to the ordinary `bash` tool. The tool description tells the model this. When a task still ends in under 2 s, its notice reminds the model to use `bash` for commands that fast.
 
 | Tool | What it does |
@@ -146,7 +148,8 @@ A dispatched worker loses the coordinator tools as soon as its preamble arrives,
 | `PI_BG_ORCA_BIN` | Path of the `orca` CLI (default `orca` on PATH). |
 | `PI_BG_CARD=off` | Start with the card hidden. |
 | `PI_BG_WORKER_MAIL=0` | Workers do not watch their mailbox for coordinator mail. |
-| `PI_BG_ATTACH=0` | Workers run bash commands the ordinary way (no detaching). |
+| `PI_BG_ATTACH=0` | Bash commands run the ordinary way (no automatic background, no detaching on coordinator mail). |
+| `PI_BG_AUTO_BACKGROUND_S` | Seconds after which a running bash command moves to the background (default 10; `0` = never). |
 | `PI_BG_STATE_DIR` | State root (default `$XDG_STATE_HOME/pi-bg` or `~/.local/state/pi-bg`). |
 
 ## Development

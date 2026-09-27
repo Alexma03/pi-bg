@@ -320,6 +320,50 @@ test("worker attach: an aborted or timed-out bash call cancels its attached comm
 	});
 });
 
+test("any interactive session: a bash command still running after the threshold moves to the background by itself", async () => {
+	const state = await mkdtemp(join(tmpdir(), "pi-bg-state-"));
+	await withEnv({ ORCA_TERMINAL_HANDLE: undefined, GENTLE_PI_AGENTS_CHILD: undefined, PI_BG_STATE_DIR: state, PI_BG_AUTO_BACKGROUND_S: "1" }, async () => {
+		const { spawn } = await import("node:child_process");
+		const f = fakePi();
+		(f.ctx as { hasUI: boolean }).hasUI = true;
+		piBg(f.pi as never);
+		await f.fire("session_start");
+		// Fast commands and orca lifecycle calls are left alone; others run attached.
+		const quick = { toolName: "bash", toolCallId: "q", input: { command: "echo hi" } };
+		await f.fire("tool_call", quick);
+		assert.match(quick.input.command, /attach-client/);
+		const slow = { toolName: "bash", toolCallId: "s", input: { command: "sleep 3; echo done", timeout: 20 } };
+		await f.fire("tool_call", slow);
+		const child = spawn("bash", ["-c", slow.input.command.split("\n").slice(1).join("\n")]);
+		let out = "";
+		child.stdout.on("data", (d) => (out += d));
+		const code = await new Promise((r) => child.on("close", r));
+		assert.equal(code, 0);
+		assert.match(out, /still running after 1s, so it moved to the background as bg2/);
+		await f.fire("tool_execution_end", { toolCallId: "s", toolName: "bash", result: {}, isError: false });
+		const status = (await f.tools.get("bg_status")!.execute("st", { id: "bg2" }, undefined, undefined, f.ctx)).content[0].text ?? "";
+		assert.match(status, /bg2 running/, "still running after the bash call returned");
+		await until(() => f.sent.some((x) => /bg2 .*exited 0/.test(x.message.content)), 6_000);
+		await f.fire("session_shutdown");
+	});
+});
+
+test("gentle subagent children and non-interactive sessions never auto-background", async () => {
+	for (const env of [{ GENTLE_PI_AGENTS_CHILD: "1", ui: true }, { GENTLE_PI_AGENTS_CHILD: undefined, ui: false }]) {
+		const state = await mkdtemp(join(tmpdir(), "pi-bg-state-"));
+		await withEnv({ ORCA_TERMINAL_HANDLE: undefined, GENTLE_PI_AGENTS_CHILD: env.GENTLE_PI_AGENTS_CHILD, PI_BG_STATE_DIR: state }, async () => {
+			const f = fakePi();
+			(f.ctx as { hasUI: boolean }).hasUI = env.ui;
+			piBg(f.pi as never);
+			await f.fire("session_start");
+			const call = { toolName: "bash", toolCallId: "c", input: { command: "sleep 1" } };
+			await f.fire("tool_call", call);
+			assert.equal(call.input.command, "sleep 1");
+			await f.fire("session_shutdown");
+		});
+	}
+});
+
 test("worker attach: a bash call without a timeout gets 30 s, one with a timeout keeps it even in the background", async () => {
 	const state = await mkdtemp(join(tmpdir(), "pi-bg-state-"));
 	const dir = await fakeOrcaDir(null);

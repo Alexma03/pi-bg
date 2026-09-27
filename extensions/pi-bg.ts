@@ -54,8 +54,10 @@ const ORCA_CARD_KEY = "pi-bg-orca-card";
 const NOTICE_BATCH_MS = 400;
 const FLEET_BATCH_MS = 5_000;
 const MAX_TIMEOUT_S = 24 * 3600;
-/** A worker's bash call without its own timeout is expected to be short. */
+/** A bash call without its own timeout is expected to be short. */
 const ATTACH_DEFAULT_TIMEOUT_S = 30;
+/** A bash command still running after this moves to the background by itself. */
+const AUTO_BACKGROUND_S = 10;
 const ORCA_TOOLS = ["orca_ack", "orca_inbox", "orca_workers", "orca_watch"];
 /** The prompt pi-bg sends to wake an idle session; not new direction from the user. */
 const WAKE_PREFIX = "⟳ pi-bg: ";
@@ -142,6 +144,8 @@ export default function piBg(pi: ExtensionAPI) {
 	let mailPolling = false;
 	/** bash tool calls whose command runs as an attached pi-bg task. */
 	const attachedCalls = new Map<string, string>();
+	/** Per attached bash call: the timer that moves it to the background. */
+	const autoTimers = new Map<string, ReturnType<typeof setTimeout>>();
 	let active = false;
 
 	const now = () => Date.now();
@@ -397,7 +401,8 @@ export default function piBg(pi: ExtensionAPI) {
 	pi.on("session_shutdown", async () => {
 		if (!active) return;
 		active = false;
-		for (const timer of [noticeTimer, fleetTimer]) if (timer) clearTimeout(timer);
+		for (const timer of [noticeTimer, fleetTimer, ...autoTimers.values()]) if (timer) clearTimeout(timer);
+		autoTimers.clear();
 		if (tickTimer) clearInterval(tickTimer);
 		if (mailTimer) clearInterval(mailTimer);
 		noticeTimer = fleetTimer = tickTimer = mailTimer = undefined;
@@ -538,9 +543,13 @@ export default function piBg(pi: ExtensionAPI) {
 			if (bridgeOwnsMailbox()) return { block: true, reason: BLOCK_REASON };
 			return;
 		}
-		// A dispatched worker runs its commands as attached pi-bg tasks, so a
-		// coordinator message can move a blocking one to the background.
-		if (!workerActive() || !manager || env.PI_BG_ATTACH === "0" || !attachable(command)) return;
+		// Bash commands run as attached pi-bg tasks: one still running after
+		// AUTO_BACKGROUND_S moves to the background by itself, and a dispatched
+		// worker's also moves when its coordinator writes. Not in gentle subagent
+		// children (their session ends with the answer, killing the task) nor in
+		// non-interactive runs.
+		const interactive = ctx.hasUI === true && !gentleChild;
+		if (!(interactive || workerActive()) || !manager || env.PI_BG_ATTACH === "0" || !attachable(command)) return;
 		try {
 			const firstLine = command.split("\n")[0];
 			// The bash call's own timeout still applies once the command moves to the
@@ -548,6 +557,16 @@ export default function piBg(pi: ExtensionAPI) {
 			const timeoutS = typeof input.timeout === "number" && input.timeout > 0 ? input.timeout : ATTACH_DEFAULT_TIMEOUT_S;
 			const snap = await manager.start({ command, cwd: ctx.cwd, label: `bash · ${firstLine.slice(0, 60)}`, attached: true, timeoutMs: timeoutS * 1000 });
 			attachedCalls.set(event.toolCallId, snap.id);
+			const autoS = Number(env.PI_BG_AUTO_BACKGROUND_S ?? AUTO_BACKGROUND_S);
+			if (interactive && Number.isFinite(autoS) && autoS > 0) {
+				const m = manager;
+				const timer = setTimeout(() => {
+					autoTimers.delete(event.toolCallId);
+					if (m.get(snap.id)?.attached) m.detach(snap.id, "slow", autoS * 1000);
+				}, autoS * 1000);
+				timer.unref?.();
+				autoTimers.set(event.toolCallId, timer);
+			}
 			input.command = `# pi-bg ${snap.id} (moves to the background if your coordinator writes): ${firstLine.slice(0, 200)}\n${attachCommand(process.execPath, ATTACH_CLIENT, snap.logPath, snap.outputOffset, snap.id)}`;
 		} catch {
 			/* too many tasks or no log dir: run it the ordinary way */
@@ -556,6 +575,11 @@ export default function piBg(pi: ExtensionAPI) {
 	});
 
 	pi.on("tool_execution_end", (event) => {
+		const timer = autoTimers.get(event.toolCallId);
+		if (timer) {
+			clearTimeout(timer);
+			autoTimers.delete(event.toolCallId);
+		}
 		const id = attachedCalls.get(event.toolCallId);
 		if (!id) return;
 		attachedCalls.delete(event.toolCallId);
@@ -624,6 +648,7 @@ export default function piBg(pi: ExtensionAPI) {
 		promptGuidelines: [
 			"Choose bash or bg_run by how long the command takes. Near-instant commands (cd, pwd, ls, cat, head, grep, rg, find, echo, git status/diff/log, jq on a small file) always go through bash: bg_run adds a round trip and hides the output. Use bg_run for commands that take 10 s or more or never end (test suites, builds, verify gates, installs, deploys, `gh run watch`, log watches).",
 			"To run several slow commands at once (for example lint, typecheck and tests, each taking a few seconds or more), start one bg_run per command in the same turn; each reports on its own. Do not do this for instant commands.",
+			"Waiting for something is a slow command too: CI (`gh pr checks --watch`, `gh run watch`, a `for … sleep` loop polling `gh pr checks`), deploys, ansible runs, docker builds, service restarts. Start those with bg_run from the beginning, with a watch pattern when you wait for a line, instead of a bash call with a large timeout. A bash command still running after 10 s is moved to the background by itself; do not rely on that, and do not poll or sleep for it.",
 			"After starting a bg_run, continue with other work or end the turn; its completion arrives as a 'pi-bg' message. Never loop with sleep to wait for it.",
 			"Delegation layers: gentle subagents for in-session exploration or parallel work; Orca workers for work in another terminal, worktree or repository; bg_run for plain shell commands. They combine freely.",
 		],

@@ -346,11 +346,11 @@ export class TaskManager {
 	 * Let an attached task keep running in the background: its attach client
 	 * returns now, and the ordinary exit notice follows when it ends.
 	 */
-	detach(id: string): TaskSnapshot | undefined {
+	detach(id: string, reason: "mail" | "slow" = "mail", afterMs?: number): TaskSnapshot | undefined {
 		const task = this.tasks.get(id);
 		if (!task || task.done || !task.snap.attached) return undefined;
 		task.snap.attached = false;
-		void writeCtl(task.snap.logPath, { state: "detached", id });
+		void writeCtl(task.snap.logPath, { state: "detached", id, reason, ...(afterMs !== undefined ? { afterMs } : {}) });
 		this.changed();
 		return { ...task.snap };
 	}
