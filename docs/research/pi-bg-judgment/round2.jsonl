@@ -1,0 +1,1 @@
+{"id":"JD-B-003","lens":"judgment-day","location":"lib/tasks/manager.ts:283","severity":"CRITICAL","status_at_freeze":"open","evidence_class":"deterministic","evidence_claim":"bg_tail (and task exit notices in lib/tasks/notice.ts) redact per line, so the multiline PEM pattern never matches and private-key material lines are forwarded unredacted to the model and terminal."}
