@@ -134,7 +134,8 @@ A dispatched worker loses the coordinator tools as soon as its preamble arrives,
     - Agent, model and start time come from one `worker-show` per dispatch; the objective comes from `run-show`. All these reads are read-only; the first two are cached.
     - The card is hidden while the session orchestrates no agent and the bridge is just listening.
     - A bridge row appears only when something needs attention: unprocessed messages, a retry, or a lost Run.
-  - `/bg card on|off|collapse` controls both cards. The footer also has one segment for each (`⏵ 2 tareas`, `orca ◉ escuchando`).
+  - **A click on a card folds it** to a single line: its title plus what needs attention, e.g. `╶─ ⏵ Segundo plano · 2 en marcha · 1 falló ▸ ──╴` or `⇄ Orca · Funds DB · 11 agentes · 2 necesitan atención ▸`. Another click unfolds it. Each card folds on its own. Clicks need Pi's fullscreen mode (`tuiMode: fullscreen`), which captures the mouse; `/bg card fold` folds or unfolds both cards from the keyboard.
+  - `/bg card on|off|collapse|fold` controls both cards. The footer also has one segment for each (`⏵ 2 tareas`, `orca ◉ escuchando`).
 - **Delivery messages.** They render one glyph per message type (`worker_done` ✔/✖ by outcome, `question` ?, `escalation` ⚠).
 - **Tool results.** They are one line unless expanded.
 - **Live state.** Wake messages end with a short live-state block (running tasks, pending delivery, fleet summary). It is not added to the system prompt, which keeps the prompt cache stable.

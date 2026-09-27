@@ -29,6 +29,9 @@ function fakePi() {
 	const handlers = new Map<string, Handler[]>();
 	const sent: Array<{ message: { customType: string; content: string; details?: unknown }; options: unknown }> = [];
 	const userSent: Array<{ text: string; options: unknown }> = [];
+	const commands = new Map<string, { handler: (args: string, ctx: unknown) => unknown }>();
+	type Widget = { render(width: number): string[]; handleMouse?(event: unknown): { handled?: boolean } | undefined };
+	const widgets = new Map<string, Widget>();
 	const state = { idle: false };
 	const emitted: Array<{ channel: string; data: unknown }> = [];
 	const entries: Array<{ customType: string; data: unknown }> = [];
@@ -40,7 +43,7 @@ function fakePi() {
 			return () => {};
 		},
 		registerMessageRenderer: () => {},
-		registerCommand: () => {},
+		registerCommand: (name: string, command: { handler: (args: string, ctx: unknown) => unknown }) => commands.set(name, command),
 		sendMessage: (message: never, options: unknown) => sent.push({ message, options }),
 		sendUserMessage: (text: string, options: unknown) => userSent.push({ text, options }),
 		appendEntry: (customType: string, data: unknown) => entries.push({ customType, data }),
@@ -54,7 +57,14 @@ function fakePi() {
 		cwd: tmpdir(),
 		mode: "tui",
 		hasUI: false,
-		ui: { setStatus: () => {}, setWidget: () => {}, notify: () => {} },
+		ui: {
+			setStatus: () => {},
+			setWidget: (key: string, factory: ((tui: unknown, theme: unknown) => Widget) | undefined) => {
+				if (factory) widgets.set(key, factory({ requestRender: () => {} }, { fg: (_c: string, t: string) => t }));
+				else widgets.delete(key);
+			},
+			notify: () => {},
+		},
 		sessionManager: { getSessionId: () => `s-${Math.random().toString(36).slice(2)}`, getBranch: () => entries.map((e) => ({ type: "custom", ...e })) },
 		hasPendingMessages: () => false,
 		isIdle: () => state.idle,
@@ -64,7 +74,7 @@ function fakePi() {
 		for (const h of handlers.get(event) ?? []) last = await h(payload, ctx);
 		return last;
 	};
-	return { pi, ctx, tools, sent, userSent, state, emitted, fire, active: () => activeTools };
+	return { pi, ctx, tools, sent, userSent, state, commands, widgets, emitted, fire, active: () => activeTools };
 }
 
 async function withEnv<T>(vars: Record<string, string | undefined>, fn: () => Promise<T>): Promise<T> {
@@ -133,6 +143,39 @@ test("an idle session is woken through a user prompt (before_agent_start runs); 
 		await until(() => f.sent.length === 2);
 		assert.deepEqual(f.sent[1].options, { deliverAs: "steer", triggerTurn: true });
 		assert.equal(f.userSent.length, 1, "no prompt while busy");
+		await f.fire("session_shutdown");
+	});
+});
+
+test("a click on a card folds it to one line and a second click unfolds it; /bg card fold does the same", async () => {
+	const state = await mkdtemp(join(tmpdir(), "pi-bg-state-"));
+	await withEnv({ ORCA_TERMINAL_HANDLE: undefined, GENTLE_PI_AGENTS_CHILD: undefined, PI_BG_STATE_DIR: state }, async () => {
+		const f = fakePi();
+		(f.ctx as { hasUI: boolean }).hasUI = true;
+		piBg(f.pi as never);
+		await f.fire("session_start");
+		await f.tools.get("bg_run")!.execute("t1", { command: "sleep 5", label: "espera", timeout_s: 60 }, undefined, undefined, f.ctx);
+		const card = f.widgets.get("pi-bg-card")!;
+		const open = card.render(60).filter(Boolean);
+		assert.ok(open.length >= 3, open.join("\n"));
+		const mouse = (type: string, y: number) => card.handleMouse!({ type, button: "left", x: 3, y, screenX: 3, screenY: y, width: 60, height: open.length + 1, shift: false, alt: false, ctrl: false });
+		// Fullscreen turns press + release into a click only for a component that claimed the press.
+		const click = (y: number) => {
+			assert.deepEqual(mouse("press", y), { handled: true, render: false }, "the press is claimed");
+			return mouse("click", y);
+		};
+		assert.equal(mouse("press", open.length), undefined, "the spacer line below the card is not part of it");
+		assert.equal(card.handleMouse!({ type: "wheel", button: "none", x: 0, y: 0, screenX: 0, screenY: 0, width: 60, height: 4, shift: false, alt: false, ctrl: false }), undefined, "only clicks");
+		assert.deepEqual(click(1), { handled: true, render: true });
+		const folded = card.render(60).filter(Boolean);
+		assert.equal(folded.length, 1);
+		assert.match(folded[0], /Segundo plano · 1 en marcha ▸/);
+		click(0);
+		assert.equal(card.render(60).filter(Boolean).length, open.length);
+		await f.commands.get("bg")!.handler("card fold", f.ctx);
+		assert.equal(f.widgets.get("pi-bg-card")!.render(60).filter(Boolean).length, 1, "/bg card fold folds the cards");
+		await f.commands.get("bg")!.handler("card fold", f.ctx);
+		assert.equal(f.widgets.get("pi-bg-card")!.render(60).filter(Boolean).length, open.length, "and again unfolds them");
 		await f.fire("session_shutdown");
 	});
 });

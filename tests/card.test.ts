@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { buildBgCard, buildOrcaCard, renderCardLines, workerLook } from "../lib/ui/card.ts";
+import { buildBgCard, buildOrcaCard, foldCard, renderCardLines, workerLook } from "../lib/ui/card.ts";
 import { initialState } from "../lib/orca/machine.ts";
 import { initialFleet, updateFleet, type WorkerRow } from "../lib/orca/fleet.ts";
 import type { TaskSnapshot } from "../lib/tasks/manager.ts";
@@ -165,4 +165,23 @@ test("collapsed cards keep only problems", () => {
 	const orca = buildOrcaCard({ now: 1000, orca: { ...initialState(), phase: "fenced", runId: "run_x", reason: "not the Run consumer" }, collapsed: true });
 	assert.ok(orca);
 	assert.deepEqual(orca.rows.map((r) => r.text), ["✕ esta terminal ya no coordina el Run"]);
+});
+
+test("a folded card is one line: its title plus a summary of what needs attention", () => {
+	const end = 59_000;
+	const bg = buildBgCard({ now: 60_000, tasks: [task("bg1", { label: "verify" }), task("bg2", { status: "exited", exitCode: 1, endedAt: end }), task("bg3", { status: "timeout", endedAt: end })] })!;
+	assert.equal(bg.summary, "2 fallaron");
+	const lines = renderCardLines(foldCard(bg), plainTheme, 60);
+	assert.equal(lines.length, 1, lines.join("\n"));
+	assert.match(lines[0], /^╶─ ⏵ Segundo plano · 1 en marcha · 2 fallaron ▸ ─+╴$/);
+	assert.equal(visibleWidth(lines[0]), 60);
+	const ok = buildBgCard({ now: 60_000, tasks: [task("bg1", { label: "verify" })] })!;
+	assert.equal(ok.summary, undefined);
+	assert.match(renderCardLines(foldCard(ok), plainTheme, 60)[0], /Segundo plano · 1 en marcha ▸/);
+	const orca = { ...initialState(), phase: "waiting" as const, runId: "run_r" };
+	let fleet = updateFleet(initialFleet(), [worker("a", { activity: "done" }), worker("b")], [], 0).state;
+	fleet = updateFleet(fleet, [worker("a", { activity: "done" }), worker("b")], undefined, 5 * 60_000).state;
+	const card = buildOrcaCard({ now: 5 * 60_000, orca, fleet, objective: "Lab" })!;
+	assert.equal(card.summary, "1 necesita atención");
+	assert.match(renderCardLines(foldCard(card), plainTheme, 80)[0], /Orca · Lab · 2 agentes · 1 necesita atención ▸/);
 });

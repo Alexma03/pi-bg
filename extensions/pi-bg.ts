@@ -16,7 +16,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Text, type TUI } from "@earendil-works/pi-tui";
+import { Text, type TUI, type TuiMouseEvent } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { OrcaBridge, pruneOld } from "../lib/orca/bridge.ts";
 import { formatDelivery, heartbeatCount, typeSummary, type Delivery } from "../lib/orca/delivery.ts";
@@ -34,7 +34,7 @@ import { bgStatus, orcaStatus } from "../lib/status.ts";
 import { TaskManager, type TaskSnapshot } from "../lib/tasks/manager.ts";
 import { formatNotices, type TaskNotice } from "../lib/tasks/notice.ts";
 import { clip, formatDuration, sanitizeTerminal } from "../lib/text.ts";
-import { buildBgCard, buildOrcaCard, renderCardLines, type CardModel } from "../lib/ui/card.ts";
+import { buildBgCard, buildOrcaCard, foldCard, renderCardLines, type CardModel } from "../lib/ui/card.ts";
 import { deliveryView, messageFacts, type MessageFact } from "../lib/ui/delivery-view.ts";
 import { createWakeBudget, takeWake } from "../lib/wake-budget.ts";
 
@@ -138,6 +138,8 @@ export default function piBg(pi: ExtensionAPI) {
 	let tickTimer: ReturnType<typeof setInterval> | undefined;
 	let cardTui: TUI | undefined;
 	let cardMode: "on" | "collapsed" | "off" = env.PI_BG_CARD === "off" ? "off" : "on";
+	/** Widget keys of the cards folded to one line (by a click or /bg card fold). */
+	const foldedCards = new Set<string>();
 	let orcaToolsActive: boolean | undefined;
 	let mail: MailState = initialMail();
 	let mailTimer: ReturnType<typeof setInterval> | undefined;
@@ -464,10 +466,23 @@ export default function piBg(pi: ExtensionAPI) {
 		const widget = (key: string, build: () => CardModel | undefined) =>
 			ctx.ui.setWidget(key, (tui, theme) => {
 				cardTui = tui;
+				let height = 0;
 				return {
 					render(width: number) {
 						const model = build();
-						return model ? [...renderCardLines(model, theme, width), ""] : [];
+						const lines = model ? [...renderCardLines(foldedCards.has(key) ? foldCard(model) : model, theme, width), ""] : [];
+						height = lines.length;
+						return lines;
+					},
+					// A left click on the card (not its spacer line) folds or unfolds it.
+					// Fullscreen synthesizes the click only for the component that claimed the press.
+					handleMouse(event: TuiMouseEvent) {
+						if (event.button !== "left" || height === 0 || event.y < 0 || event.y >= height - 1) return undefined;
+						if (event.type === "press") return { handled: true, render: false };
+						if (event.type !== "click") return undefined;
+						if (foldedCards.has(key)) foldedCards.delete(key);
+						else foldedCards.add(key);
+						return { handled: true, render: true };
 					},
 					invalidate() {},
 				};
@@ -557,7 +572,8 @@ export default function piBg(pi: ExtensionAPI) {
 			const timeoutS = typeof input.timeout === "number" && input.timeout > 0 ? input.timeout : ATTACH_DEFAULT_TIMEOUT_S;
 			const snap = await manager.start({ command, cwd: ctx.cwd, label: `bash · ${firstLine.slice(0, 60)}`, attached: true, timeoutMs: timeoutS * 1000 });
 			attachedCalls.set(event.toolCallId, snap.id);
-			const autoS = Number(env.PI_BG_AUTO_BACKGROUND_S ?? AUTO_BACKGROUND_S);
+			// Capped at 24 h: a larger setTimeout delay overflows and fires at once.
+			const autoS = Math.min(Number(env.PI_BG_AUTO_BACKGROUND_S ?? AUTO_BACKGROUND_S), MAX_TIMEOUT_S);
 			if (interactive && Number.isFinite(autoS) && autoS > 0) {
 				const m = manager;
 				const timer = setTimeout(() => {
@@ -836,7 +852,7 @@ export default function piBg(pi: ExtensionAPI) {
 	// ---- commands -----------------------------------------------------------
 
 	pi.registerCommand("bg", {
-		description: "pi-bg: `/bg` lists tasks · `/bg kill <id|all>` · `/bg card on|off|collapse`.",
+		description: "pi-bg: `/bg` lists tasks · `/bg kill <id|all>` · `/bg card on|off|collapse|fold` (a click on a card also folds it).",
 		handler: async (args, ctx) => {
 			const m = manager;
 			if (!m) return;
@@ -845,6 +861,15 @@ export default function piBg(pi: ExtensionAPI) {
 				const ids = target === "all" ? m.running().map((t) => t.id) : [target];
 				const killed = ids.filter((id) => m.cancel(id));
 				ctx.ui.notify(killed.length ? `Cancelling ${killed.join(", ")}` : `Nothing to cancel for ${target}`, "info");
+				return;
+			}
+			if (verb === "card" && target === "fold") {
+				// Fold both cards to one line each, or unfold them if any is folded.
+				const unfold = foldedCards.size > 0;
+				foldedCards.clear();
+				if (!unfold) for (const key of [CARD_KEY, ORCA_CARD_KEY]) foldedCards.add(key);
+				cardTui?.requestRender();
+				ctx.ui.notify(unfold ? "pi-bg cards unfolded" : "pi-bg cards folded", "info");
 				return;
 			}
 			if (verb === "card") {

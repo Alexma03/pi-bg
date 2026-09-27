@@ -25,6 +25,15 @@ export interface CardModel {
 	tone: Tone;
 	rows: CardRow[];
 	hint?: string;
+	/** What needs attention, shown next to the title when the card is folded. */
+	summary?: string;
+	/** Folded: rendered as a single line (title and summary). */
+	folded?: boolean;
+}
+
+/** The card as one line; a click on it unfolds it again. */
+export function foldCard(model: CardModel): CardModel {
+	return { ...model, folded: true, rows: [] };
 }
 
 export interface BgCardInput {
@@ -124,9 +133,11 @@ export function buildBgCard(input: BgCardInput): CardModel | undefined {
 	}
 
 	const running = tasks.filter((t) => t.status === "running").length;
+	const failed = tasks.filter((t) => t.status !== "running" && taskOutcome(t).tone === "error").length;
 	return {
 		glyph: "⏵",
 		title: `Segundo plano · ${running ? `${running} en marcha` : "terminadas"}`,
+		...(failed ? { summary: failed === 1 ? "1 falló" : `${failed} fallaron` } : {}),
 		tone: tone.tone,
 		rows: fit(rows, input.collapsed, input.maxRows ?? 8, "/bg"),
 		hint: input.collapsed ? "plegada" : undefined,
@@ -158,6 +169,7 @@ export function workerLook(r: WorkerRow, activitySince: number, now: number, sta
 
 /** The coordinator's agents, plus the bridge when it needs attention. Hidden while no agent is orchestrated and the bridge is just listening. */
 export function buildOrcaCard(input: OrcaCardInput): CardModel | undefined {
+	let attention = 0;
 	const orca = input.orca && input.orca.phase !== "off" ? input.orca : undefined;
 	if (!orca) return undefined;
 	const fleet = input.fleet;
@@ -194,7 +206,10 @@ export function buildOrcaCard(input: OrcaCardInput): CardModel | undefined {
 			const detail = input.details?.get(r.dispatchId);
 			const seen = isInProgress(r) ? input.activity?.get(r.dispatchId) : undefined;
 			const look = workerLook(r, t.activitySince, input.now, undefined, seen);
-			if (look.tone === "warning" || look.tone === "error") tone.raise(look.tone === "error" ? "warning" : look.tone);
+			if (look.tone === "warning" || look.tone === "error") {
+				tone.raise(look.tone === "error" ? "warning" : look.tone);
+				attention++;
+			}
 			const elapsed = detail?.startedAt != null ? formatDuration(Math.max(0, (t.settledAt ?? input.now) - detail.startedAt)) : "";
 			const human = r.ownership === "user_owned" ? " · lo manejas tú" : "";
 			const agent = detail?.agent || r.provider;
@@ -213,9 +228,12 @@ export function buildOrcaCard(input: OrcaCardInput): CardModel | undefined {
 
 	const name = input.objective?.trim() || (orca.runId ? shortId(orca.runId) : "orquestación");
 	const count = open ? ` · ${open} ${open === 1 ? "agente" : "agentes"}` : "";
+	const pending = orca.phase === "pending" || orca.phase === "acking";
+	const summary = [attention ? `${attention} ${attention === 1 ? "necesita" : "necesitan"} atención` : "", pending ? "mensajes sin procesar" : ""].filter(Boolean).join(" · ");
 	return {
 		glyph: "⇄",
 		title: `Orca · ${name}${count}`,
+		...(summary ? { summary } : {}),
 		tone: tone.tone,
 		rows: fit(rows, input.collapsed, input.maxRows ?? 12, "orca_workers"),
 		hint: input.collapsed ? "plegada" : undefined,
@@ -237,6 +255,12 @@ const ROW: Record<Tone, string> = { muted: "dim", info: "text", success: "succes
 export function renderCardLines(model: CardModel, theme: CardTheme, width: number): string[] {
 	const w = Math.max(10, Math.floor(width));
 	const frame = (t: string) => theme.fg(FRAME[model.tone], t);
+	if (model.folded) {
+		const head = `${model.glyph} ${model.title}${model.summary ? ` · ${model.summary}` : ""} ▸`;
+		const title = truncateToWidth(head, Math.max(1, w - 5), "…");
+		const fill = "─".repeat(Math.max(0, w - 5 - visibleWidth(title)));
+		return [frame("╶─ ") + theme.fg(TITLE[model.tone], title) + frame(` ${fill}╴`)];
+	}
 	const head = `${model.glyph} ${model.title}`;
 	const hint = model.hint ? ` ${model.hint} ` : "";
 	const titleSpace = w - 5 - visibleWidth(hint);
