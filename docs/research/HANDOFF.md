@@ -9,7 +9,7 @@ pi-bg is a Pi extension with two parts:
 
 | Path | Branch / head | State |
 | --- | --- | --- |
-| `/home/alex/Projects/pi-bg` | `main` `49cfa1f` | v1; Judgment Day APPROVED; 59 tests |
+| `/home/alex/Projects/pi-bg` | `main` `4c6250a` | v1 + v1.1 (squashed); 98 tests |
 | `/home/alex/Projects/pi-bg-v11` (git worktree) | `feat/v1.1` `1582da8` | Adds fleet watch, the worker-side reminder and the UI card; 98 tests; lab-proven. Not merged into `main` yet. |
 
 Both paths moved from `~/src` on 2026-09-27, and the worktree links were repaired. The repo has no remote.

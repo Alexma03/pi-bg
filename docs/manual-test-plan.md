@@ -5,7 +5,7 @@ Run this plan in a throwaway Pi session in its **own** Orca terminal, with a **t
 ## 0. Setup
 
 1. Create a lab terminal in the Financial Hub folder workspace:
-   `orca terminal create --worktree id:<folder id> --title pi-bg-lab --command "mkdir -p /tmp/pi-bg-lab && cd /tmp/pi-bg-lab && pi -e /home/alex/src/pi-bg"`.
+   `orca terminal create --worktree id:<folder id> --title pi-bg-lab --command "mkdir -p /tmp/pi-bg-lab && cd /tmp/pi-bg-lab && pi -e /home/alex/Projects/pi-bg"`.
 2. Expected: Pi starts without errors, and the footer shows no pi-bg segment because no Run is bound yet.
 
 ## 1. Background tasks

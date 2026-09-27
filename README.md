@@ -7,8 +7,8 @@ It has no runtime dependencies: Pi supplies `@earendil-works/pi-coding-agent`, `
 ## Install
 
 ```bash
-pi -e /home/alex/src/pi-bg            # try it for one session
-pi install /home/alex/src/pi-bg       # add it to ~/.pi/agent/settings.json
+pi -e /home/alex/Projects/pi-bg            # try it for one session
+pi install /home/alex/Projects/pi-bg       # add it to ~/.pi/agent/settings.json
 ```
 
 Restart or `/reload` running sessions to pick it up.
