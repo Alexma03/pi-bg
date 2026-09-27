@@ -103,6 +103,12 @@ test("task notices are compact and name the log", () => {
 	assert.match(formatNotice(notice({ kind: "match", pattern: "done", stillRunning: false, stopped: true })), /matched \/done\/ after 4m12s · stopped/);
 	assert.match(formatNotice(notice({ kind: "match", pattern: "hit", stillRunning: false, eventNumber: 1, maxEvents: 2 })), /matched \/hit\/ \(event 1\/2\) after 4m12s · before it exited$/m, "each-mode flush at exit: the watch did not stop it");
 	assert.match(formatNotice(notice({ kind: "timeout" })), /hit its deadline/);
+	// A near-instant task teaches the model to use bash next time; a slow one does not.
+	assert.match(formatNotice(notice({ durationMs: 800 })), /took under 2 s: run commands this fast with bash/);
+	assert.match(formatNotice(notice({ durationMs: 800, exitCode: 1 })), /took under 2 s/);
+	assert.doesNotMatch(formatNotice(notice({ durationMs: 12_000 })), /took under/);
+	assert.doesNotMatch(formatNotice(notice({ kind: "match", durationMs: 800, pattern: "x" })), /took under/, "a watch hit is not a fast command");
+	assert.doesNotMatch(formatNotice(notice({ kind: "error", durationMs: 0 })), /took under/, "a command that could not start is reported as such");
 	const many = formatNotices([notice({}), notice({ id: "bg2", label: "bg2" })]);
 	assert.match(many, /^pi-bg: 2 background task updates/);
 	assert.match(formatNotice(notice({ lines: ["password=supersecret1"] })), /\[REDACTED\]/);

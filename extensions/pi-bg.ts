@@ -598,13 +598,17 @@ export default function piBg(pi: ExtensionAPI) {
 		name: "bg_run",
 		label: "Background run",
 		description:
-			"Start a shell command in the background and return immediately. Use it for anything that may take more than about a minute: verification gates, test suites, builds, CI watches (`gh run watch`, `gh pr checks --watch`), deploys, log tails, production watchers. " +
+			"Start a shell command in the background and return immediately. Only for commands that take 10 seconds or more, or that never end on their own: test suites, builds, verification gates, installs, CI watches (`gh run watch`, `gh pr checks --watch`), deploys, log tails, production watchers. " +
+			"Also for running several such commands in parallel (one bg_run each), when each takes at least a few seconds. " +
+			"Never for near-instant commands (cd, pwd, ls, cat, head, grep, rg, find, echo, git status/diff/log, reading or editing files): run those with bash, which is faster and returns the output directly. " +
 			"Output goes to a log file. When the command exits you receive a 'pi-bg' message automatically (the session wakes if idle), so do not poll or sleep: keep working, or end your turn. " +
 			"Optional watch: notify when an output line matches a regex, either once (`until`, stops the task unless keep_running) or for each match (`each`, coalesced, capped by max_events). " +
 			"timeout_s is required: pick the longest the command may reasonably take (up to 24 h); the task is stopped and reported when it is reached. Tasks, including anything they start in the background, are killed when they end, when the session exits or reloads.",
-		promptSnippet: "bg_run: run long commands in the background; you are notified when they finish or match a watch pattern.",
+		promptSnippet: "bg_run: run slow commands (10 s or more, or never-ending) in the background, alone or several in parallel; never for instant ones like cd, cat or grep.",
 		promptGuidelines: [
-			"Use bg_run instead of a blocking bash call for commands that can take more than about a minute (verify gates, builds, `gh run watch`, deploys, log watches). After starting one, continue with other work or end the turn; its completion arrives as a 'pi-bg' message. Never loop with sleep to wait for it.",
+			"Choose bash or bg_run by how long the command takes. Near-instant commands (cd, pwd, ls, cat, head, grep, rg, find, echo, git status/diff/log, jq on a small file) always go through bash: bg_run adds a round trip and hides the output. Use bg_run for commands that take 10 s or more or never end (test suites, builds, verify gates, installs, deploys, `gh run watch`, log watches).",
+			"To run several slow commands at once (for example lint, typecheck and tests, each taking a few seconds or more), start one bg_run per command in the same turn; each reports on its own. Do not do this for instant commands.",
+			"After starting a bg_run, continue with other work or end the turn; its completion arrives as a 'pi-bg' message. Never loop with sleep to wait for it.",
 			"Delegation layers: gentle subagents for in-session exploration or parallel work; Orca workers for work in another terminal, worktree or repository; bg_run for plain shell commands. They combine freely.",
 		],
 		parameters: Type.Object(

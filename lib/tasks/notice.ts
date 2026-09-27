@@ -29,6 +29,10 @@ export interface TaskNotice {
 
 const clean = (text: string): string => redact(sanitizeTerminal(text));
 
+/** A task that ended this fast should have been a plain bash call. */
+export const FAST_TASK_MS = 2_000;
+const FAST_HINT = "It took under 2 s: run commands this fast with bash directly (cd, cat, ls, grep, git status…). bg_run is for commands that take 10 s or more, or for starting several such commands in parallel.";
+
 export function noticeHeadline(n: TaskNotice): string {
 	const name = n.label && n.label !== n.id ? `${n.id} "${clip(clean(n.label), 60)}"` : n.id;
 	const after = formatDuration(n.durationMs);
@@ -52,6 +56,7 @@ export function formatNotice(n: TaskNotice, maxChars = 2_400): string {
 	const out: string[] = [noticeHeadline(n)];
 	out.push(`  $ ${clip(clean(n.command), 200)}`);
 	if (n.note) out.push(`  ${n.note}`);
+	if (n.kind === "exit" && n.durationMs < FAST_TASK_MS) out.push(`  ${FAST_HINT}`);
 	if (n.lines.length) {
 		out.push(n.kind === "match" ? "  matching lines:" : `  last ${n.lines.length} line${n.lines.length === 1 ? "" : "s"}:`);
 		// Redact the joined lines so multiline secrets (PEM blocks) still match.

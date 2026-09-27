@@ -17,6 +17,8 @@ Restart or `/reload` running sessions to pick it up.
 
 ## Background tasks
 
+`bg_run` is for commands that take **10 seconds or more**, or never end on their own (test suites, builds, installs, deploys, CI and log watches). It is also for starting **several such commands in parallel**, one `bg_run` each. Near-instant commands (`cd`, `cat`, `ls`, `grep`, `git status`…) belong to the ordinary `bash` tool. The tool description tells the model this. When a task still ends in under 2 s, its notice reminds the model to use `bash` for commands that fast.
+
 | Tool | What it does |
 | --- | --- |
 | `bg_run {command, timeout_s, cwd?, label?, watch?}` | Starts `bash -c <command>` in its own process group and returns at once with an id and a log path. `timeout_s` is required (1 s to 24 h), and a missing `cwd` is refused before anything starts. |
