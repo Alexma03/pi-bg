@@ -32,7 +32,7 @@ function fakePi() {
 	const commands = new Map<string, { handler: (args: string, ctx: unknown) => unknown }>();
 	type Widget = { render(width: number): string[]; handleMouse?(event: unknown): { handled?: boolean } | undefined };
 	const widgets = new Map<string, Widget>();
-	const state = { idle: false };
+	const state = { idle: false, rejectPrompt: false };
 	const emitted: Array<{ channel: string; data: unknown }> = [];
 	const entries: Array<{ customType: string; data: unknown }> = [];
 	let activeTools: string[] = ["bash", "read"];
@@ -45,7 +45,10 @@ function fakePi() {
 		registerMessageRenderer: () => {},
 		registerCommand: (name: string, command: { handler: (args: string, ctx: unknown) => unknown }) => commands.set(name, command),
 		sendMessage: (message: never, options: unknown) => sent.push({ message, options }),
-		sendUserMessage: (text: string, options: unknown) => userSent.push({ text, options }),
+		sendUserMessage: (text: string, options: unknown) => {
+			userSent.push({ text, options });
+			return state.rejectPrompt ? Promise.reject(new Error("no model")) : Promise.resolve();
+		},
 		appendEntry: (customType: string, data: unknown) => entries.push({ customType, data }),
 		getActiveTools: () => [...activeTools],
 		setActiveTools: (names: string[]) => {
@@ -143,6 +146,11 @@ test("an idle session is woken through a user prompt (before_agent_start runs); 
 		await until(() => f.sent.length === 2);
 		assert.deepEqual(f.sent[1].options, { deliverAs: "steer", triggerTurn: true });
 		assert.equal(f.userSent.length, 1, "no prompt while busy");
+		// If the wake prompt is refused, the notice is still delivered at once the old way.
+		f.state.idle = true;
+		f.state.rejectPrompt = true;
+		await f.tools.get("bg_run")!.execute("t3", { command: "exit 5", label: "refused", timeout_s: 60 }, undefined, undefined, f.ctx);
+		await until(() => f.sent.some((x) => /exit 5/.test(x.message.content) && (x.options as { triggerTurn?: boolean }).triggerTurn === true));
 		await f.fire("session_shutdown");
 	});
 });

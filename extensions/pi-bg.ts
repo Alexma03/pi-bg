@@ -203,7 +203,19 @@ export default function piBg(pi: ExtensionAPI) {
 		if (ctxRef?.isIdle?.()) {
 			pi.sendMessage(message, { deliverAs: "nextTurn" });
 			// "steer" only matters if the session got busy in between: then it is queued.
-			void Promise.resolve(pi.sendUserMessage(`${WAKE_PREFIX}${why}`, { deliverAs: "steer" })).catch(() => {});
+			void Promise.resolve()
+				.then(() => pi.sendUserMessage(`${WAKE_PREFIX}${why}`, { deliverAs: "steer" }))
+				.catch((error: unknown) => {
+					// Refused prompt: the queued copy would wait for the user's next message.
+					// Deliver it now the old way; the model may see it again then, which is harmless.
+					if (!active) return;
+					pi.sendMessage(message, { deliverAs: "steer", triggerTurn: true });
+					try {
+						ctxRef?.ui.notify(`pi-bg: could not start a turn for "${why}" (${clip(error instanceof Error ? error.message : String(error), 120)}); delivered it directly instead.`, "warning");
+					} catch {
+						/* no UI */
+					}
+				});
 			return;
 		}
 		pi.sendMessage(message, { deliverAs: "steer", triggerTurn: true });
