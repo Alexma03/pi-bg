@@ -28,6 +28,8 @@ function fakePi() {
 	const tools = new Map<string, { execute: (...args: unknown[]) => Promise<{ content: Array<{ text?: string }> }> }>();
 	const handlers = new Map<string, Handler[]>();
 	const sent: Array<{ message: { customType: string; content: string; details?: unknown }; options: unknown }> = [];
+	const userSent: Array<{ text: string; options: unknown }> = [];
+	const state = { idle: false };
 	const emitted: Array<{ channel: string; data: unknown }> = [];
 	const entries: Array<{ customType: string; data: unknown }> = [];
 	let activeTools: string[] = ["bash", "read"];
@@ -40,6 +42,7 @@ function fakePi() {
 		registerMessageRenderer: () => {},
 		registerCommand: () => {},
 		sendMessage: (message: never, options: unknown) => sent.push({ message, options }),
+		sendUserMessage: (text: string, options: unknown) => userSent.push({ text, options }),
 		appendEntry: (customType: string, data: unknown) => entries.push({ customType, data }),
 		getActiveTools: () => [...activeTools],
 		setActiveTools: (names: string[]) => {
@@ -54,13 +57,14 @@ function fakePi() {
 		ui: { setStatus: () => {}, setWidget: () => {}, notify: () => {} },
 		sessionManager: { getSessionId: () => `s-${Math.random().toString(36).slice(2)}`, getBranch: () => entries.map((e) => ({ type: "custom", ...e })) },
 		hasPendingMessages: () => false,
+		isIdle: () => state.idle,
 	};
 	const fire = async (event: string, payload: unknown = {}) => {
 		let last: unknown;
 		for (const h of handlers.get(event) ?? []) last = await h(payload, ctx);
 		return last;
 	};
-	return { pi, ctx, tools, sent, emitted, fire, active: () => activeTools };
+	return { pi, ctx, tools, sent, userSent, state, emitted, fire, active: () => activeTools };
 }
 
 async function withEnv<T>(vars: Record<string, string | undefined>, fn: () => Promise<T>): Promise<T> {
@@ -104,6 +108,31 @@ test("outside Orca: bg tools only, and a finished task wakes the model with stee
 		assert.match(message.content, /FAILED with exit 3/);
 		assert.deepEqual(options, { deliverAs: "steer", triggerTurn: true });
 		assert.equal(f.emitted.length, 0, "no Orca child events outside Orca");
+		await f.fire("session_shutdown");
+	});
+});
+
+test("an idle session is woken through a user prompt (before_agent_start runs); a busy one gets a steer", async () => {
+	// Pi skips before_agent_start for a turn started by sendMessage({triggerTurn}), so
+	// extensions that build the system prompt there (Gentle Shell) are missing from it,
+	// and claude-bridge refuses the turn. A user prompt from the extension goes through it.
+	const state = await mkdtemp(join(tmpdir(), "pi-bg-state-"));
+	await withEnv({ ORCA_TERMINAL_HANDLE: undefined, GENTLE_PI_AGENTS_CHILD: undefined, PI_BG_STATE_DIR: state }, async () => {
+		const f = fakePi();
+		piBg(f.pi as never);
+		await f.fire("session_start");
+		f.state.idle = true;
+		await f.tools.get("bg_run")!.execute("t1", { command: "exit 3", label: "idle", timeout_s: 60 }, undefined, undefined, f.ctx);
+		await until(() => f.userSent.length === 1);
+		assert.deepEqual(f.sent.at(-1)!.options, { deliverAs: "nextTurn" }, "the notice rides along with the prompt");
+		assert.match(f.sent.at(-1)!.message.content, /FAILED with exit 3/);
+		assert.match(f.userSent[0].text, /^⟳ pi-bg: /);
+		assert.deepEqual(f.userSent[0].options, { deliverAs: "steer" }, "still queued if the session got busy meanwhile");
+		f.state.idle = false;
+		await f.tools.get("bg_run")!.execute("t2", { command: "exit 4", label: "busy", timeout_s: 60 }, undefined, undefined, f.ctx);
+		await until(() => f.sent.length === 2);
+		assert.deepEqual(f.sent[1].options, { deliverAs: "steer", triggerTurn: true });
+		assert.equal(f.userSent.length, 1, "no prompt while busy");
 		await f.fire("session_shutdown");
 	});
 });
@@ -220,6 +249,9 @@ test("worker reminder: a completed turn without worker_done gets one continuatio
 		const r = (await f.fire("agent_before_settle", { outcome: "completed" })) as { continue?: boolean; entries?: Array<{ content: string }> };
 		assert.equal(r?.continue, true);
 		assert.match(r?.entries?.[0].content ?? "", /ctx_abc/);
+		// pi-bg's own wake prompt is not new direction: the reminder gap still applies.
+		await f.fire("input", { text: "⟳ pi-bg: 1 background task update", source: "extension" });
+		assert.equal(await f.fire("agent_before_settle", { outcome: "completed" }), undefined);
 		await f.fire("tool_result", { toolName: "bash", input: { command: "orca orchestration send --type worker_done --task-id task_abc --dispatch-id ctx_abc" }, content: [{ type: "text", text: '{"ok": true}' }], isError: false });
 		assert.equal(await f.fire("agent_before_settle", { outcome: "completed" }), undefined);
 		await f.fire("session_shutdown");

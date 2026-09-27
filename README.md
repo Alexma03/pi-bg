@@ -28,7 +28,8 @@ Restart or `/reload` running sessions to pick it up.
 
 - **Completion.**
   - When a task exits, the model receives a `pi-bg` message with the exit code or signal, the duration, the last lines and the log path.
-  - The message is sent with `deliverAs: "steer"` and `triggerTurn: true`. An idle session starts a turn at once; a busy one sees the message before its next model call.
+  - A busy session gets it as a steer message, seen before its next model call.
+  - An idle session gets it for its next turn, plus a short prompt that starts that turn (`⟳ pi-bg: 1 background task update`). A turn started by an extension message would skip `before_agent_start`, so extensions that add to the system prompt there (Gentle Shell) would be missing, and claude-bridge refuses such a turn. Delivery and fleet messages wake the session the same way.
   - Notices that settle together are batched into one message.
 - **Watch.** `watch: {pattern, flags?, mode?, keep_running?, max_events?}` tests each output line against a JavaScript regex.
   - `until` (the default) notifies on the first match and then stops the task, unless `keep_running` is set.

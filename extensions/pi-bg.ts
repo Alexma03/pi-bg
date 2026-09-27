@@ -3,10 +3,12 @@
 // model-free fleet watch of the Run's workers, and a worker-side reminder.
 // See README.md and docs/manual-test-plan.md.
 //
-// Wake delivery uses custom messages with `deliverAs: "steer"` and
-// `triggerTurn: true`: an idle session starts a turn at once; a busy one
-// sees the message before its next model call. `followUp` is avoided on
-// purpose (it waits for the whole run to stop).
+// Wake delivery: a busy session gets a custom message with `deliverAs:
+// "steer"`, seen before its next model call (`followUp` would wait for the
+// whole run to stop). An idle session gets the message for its next turn and
+// a short prompt that starts it: Pi skips before_agent_start for a turn
+// started by `triggerTurn`, so extensions that build the system prompt there
+// (Gentle Shell) would be missing from it, and claude-bridge refuses the turn.
 
 import { readFileSync } from "node:fs";
 import { stat } from "node:fs/promises";
@@ -55,6 +57,8 @@ const MAX_TIMEOUT_S = 24 * 3600;
 /** A worker's bash call without its own timeout is expected to be short. */
 const ATTACH_DEFAULT_TIMEOUT_S = 30;
 const ORCA_TOOLS = ["orca_ack", "orca_inbox", "orca_workers", "orca_watch"];
+/** The prompt pi-bg sends to wake an idle session; not new direction from the user. */
+const WAKE_PREFIX = "⟳ pi-bg: ";
 
 function stateDir(env: NodeJS.ProcessEnv): string {
 	if (env.PI_BG_STATE_DIR) return env.PI_BG_STATE_DIR;
@@ -188,20 +192,31 @@ export default function piBg(pi: ExtensionAPI) {
 
 	// ---- wake messages ----------------------------------------------------
 
+	/** Deliver a message that must reach the model now (see the header comment). */
+	const wake = (message: Parameters<typeof pi.sendMessage>[0], why: string) => {
+		if (ctxRef?.isIdle?.()) {
+			pi.sendMessage(message, { deliverAs: "nextTurn" });
+			// "steer" only matters if the session got busy in between: then it is queued.
+			void Promise.resolve(pi.sendUserMessage(`${WAKE_PREFIX}${why}`, { deliverAs: "steer" })).catch(() => {});
+			return;
+		}
+		pi.sendMessage(message, { deliverAs: "steer", triggerTurn: true });
+	};
+
 	const flushNotices = () => {
 		noticeTimer = undefined;
 		if (!active || noticeQueue.length === 0) return;
 		const batch = noticeQueue;
 		noticeQueue = [];
 		const state = liveState();
-		pi.sendMessage(
+		wake(
 			{
 				customType: TASK_MESSAGE,
 				content: formatNotices(batch) + (state ? `\n\n${state}` : ""),
 				display: true,
 				details: { tasks: batch.map((n) => ({ id: n.id, kind: n.kind, exitCode: n.exitCode, signal: n.signal, stillRunning: n.stillRunning })) },
 			},
-			{ deliverAs: "steer", triggerTurn: true },
+			batch.length === 1 ? "1 background task update" : `${batch.length} background task updates`,
 		);
 	};
 
@@ -216,27 +231,27 @@ export default function piBg(pi: ExtensionAPI) {
 
 	const injectDelivery = (delivery: Delivery, note: string | undefined, rawPath: string | undefined) => {
 		if (!active) return;
-		pi.sendMessage(
+		wake(
 			{
 				customType: ORCA_MESSAGE,
 				content: formatDelivery(delivery, { note, rawPath }),
 				display: true,
 				details: { deliveryId: delivery.id, runId: delivery.runId, types: typeSummary(delivery), replay: Boolean(note), heartbeats: heartbeatCount(delivery), messages: messageFacts(delivery) },
 			},
-			{ deliverAs: "steer", triggerTurn: true },
+			`Orca delivery ${delivery.id}`,
 		);
 	};
 
 	const remindDelivery = (delivery: Delivery) => {
 		if (!active) return;
-		pi.sendMessage(
+		wake(
 			{
 				customType: ORCA_MESSAGE,
 				content: `Orca delivery ${delivery.id} has been pending for over 10 minutes. The Run mailbox is paused until it is acknowledged: finish processing it and call orca_ack with deliveryId "${delivery.id}", or tell the user what blocks it. orca_inbox shows it again.`,
 				display: true,
 				details: { deliveryId: delivery.id, runId: delivery.runId, reminder: true },
 			},
-			{ deliverAs: "steer", triggerTurn: true },
+			`Orca delivery ${delivery.id} still pending`,
 		);
 	};
 
@@ -249,25 +264,24 @@ export default function piBg(pi: ExtensionAPI) {
 		// Remember what was reported so a /reload does not report it again.
 		const seen = events.filter((e) => e.key).map((e) => ({ ...(e.dispatchId ? { dispatchId: e.dispatchId } : {}), key: e.key as string }));
 		if (seen.length) pi.appendEntry(FLEET_SEEN_ENTRY, { runId, seen });
-		const wake = shouldWake(events);
+		const wantsWake = shouldWake(events);
 		let trigger = false;
-		if (wake) {
+		if (wantsWake) {
 			const taken = takeWake(wakeBudget, now());
 			wakeBudget = taken.budget;
 			trigger = taken.allowed;
 		}
 		// A notice that waits for the next turn would carry a stale snapshot.
 		const state = trigger ? liveState() : "";
-		const suffix = wake && !trigger ? "\n(Several fleet notices in a short time: this one did not start a turn.)" : "";
-		pi.sendMessage(
-			{
-				customType: FLEET_MESSAGE,
-				content: formatFleetNotice(events, fleet.state, runId, now()) + suffix + (state ? `\n\n${state}` : ""),
-				display: true,
-				details: { runId, events: events.map((e) => ({ kind: e.kind, dispatchId: e.dispatchId, title: e.title })) },
-			},
-			trigger ? { deliverAs: "steer", triggerTurn: true } : { deliverAs: "nextTurn" },
-		);
+		const suffix = wantsWake && !trigger ? "\n(Several fleet notices in a short time: this one did not start a turn.)" : "";
+		const message = {
+			customType: FLEET_MESSAGE,
+			content: formatFleetNotice(events, fleet.state, runId, now()) + suffix + (state ? `\n\n${state}` : ""),
+			display: true,
+			details: { runId, events: events.map((e) => ({ kind: e.kind, dispatchId: e.dispatchId, title: e.title })) },
+		};
+		if (trigger) wake(message, `Orca fleet notice (${events.length} event${events.length === 1 ? "" : "s"})`);
+		else pi.sendMessage(message, { deliverAs: "nextTurn" });
 	};
 
 	const queueFleet = (events: FleetEvent[], _state: FleetState, _runId: string) => {
@@ -308,14 +322,14 @@ export default function piBg(pi: ExtensionAPI) {
 			mail = decision.state;
 			if (!decision.announce.length) return;
 			const detached = detachAll();
-			pi.sendMessage(
+			wake(
 				{
 					customType: MAIL_MESSAGE,
 					content: formatMailNotice(decision.announce, identity, { reminder: decision.reminder, detached }),
 					display: true,
 					details: { dispatchId: identity.dispatchId, messages: decision.announce.map((m) => ({ id: m.id, type: m.type, subject: m.subject })), detached: detached.map((d) => d.id) },
 				},
-				{ deliverAs: "steer", triggerTurn: true },
+				"new message from your Orca coordinator",
 			);
 		} finally {
 			mailPolling = false;
@@ -483,6 +497,8 @@ export default function piBg(pi: ExtensionAPI) {
 	// ---- Orca worker side: preamble, lifecycle results, reminder -----------
 
 	pi.on("input", (event) => {
+		// pi-bg's own wake prompt is not new direction for the worker.
+		if (event.text?.startsWith(WAKE_PREFIX)) return undefined;
 		if (inOrcaTerminal && !gentleChild) {
 			const before = worker.identity?.dispatchId;
 			worker = onInput(worker, event.text ?? "");
