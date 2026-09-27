@@ -35,6 +35,18 @@ test("otherwise the last tool action: bash, file tools, named tools", () => {
 	assert.equal(lastActivity(tool), 'bg_run · Started bg1 "espera 2 minutos" (pid 1).');
 });
 
+test("Pi's default TUI: the editor rules, cwd, token stats and status segments are chrome", () => {
+	// Captured with worker-read from a plain `pi` worker (no Gentle Shell).
+	const RULE_LINE = "─".repeat(120);
+	const footer = [RULE_LINE, RULE_LINE, "/tmp/pi-bg-lab", "↑23k ↓4.3k R139k CH96.6% $0.006 (sub) 2.4%/700k (auto)                (openai-codex) gpt-6-luna • high", "orca ◉ escuchando"];
+	const said = [" Sent msg_1462ba5bf442", " Took 0.1s", " Ya envié worker_done con resultado succeeded para esta tarea.", ...footer];
+	assert.equal(lastActivity([" $ orca orchestration send --type worker_done", ...said]), "$ orca orchestration send --type worker_done", "the last tool action still wins");
+	assert.equal(lastActivity([" Pensando.", ...footer]), "Pensando.");
+	const working = [" $ sleep 90; echo fin-largo (timeout 180s)", " Elapsed 11.0s", "── ⠦ Working ──────────────────────", RULE_LINE, " escribe algo", RULE_LINE, "/tmp/pi-bg-lab", "↑10k ↓129 R9.7k CH95.9% $0.001 (sub) 1.5%/700k (auto)   (openai-codex) gpt-6-luna • high", "⏵ 1 tarea"];
+	assert.equal(lastActivity(working), "$ sleep 90; echo fin-largo");
+	assert.equal(lastActivity(footer), undefined);
+});
+
 test("falls back to the last line the agent wrote; nothing for pure chrome", () => {
 	assert.equal(lastActivity([" Pensando en el plan.", ...CHROME_END]), "Pensando en el plan.");
 	assert.equal(lastActivity(CHROME_END), undefined);
@@ -75,7 +87,7 @@ test("orca_workers table shows agent, model and what each worker does now", () =
 	const state = updateFleet(initialFleet(), [row("a")], [{ id: "task_a", title: "Tests", spec: "", status: "dispatched", deps: [], parentId: null }], 0).state;
 	const text = formatWorkersTable(state, "run_r", 5 * 60_000, {
 		activity: new Map([["a", { text: "$ pnpm test", since: 60_000 }]]),
-		details: new Map([["a", { agent: "codex", model: "gpt-6-sol", effort: "", startedAt: 0 }]]),
+		details: new Map([["a", { agent: "codex", model: "gpt-6-sol", effort: "", startedAt: 0, reusedTerminal: false }]]),
 	});
 	assert.match(text, /- Tests · a · in_progress · working 5m00s · codex gpt-6-sol · started 5m00s ago/);
 	assert.match(text, /\n {4}now: \$ pnpm test \(unchanged 4m00s\)/);

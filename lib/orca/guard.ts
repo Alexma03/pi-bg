@@ -29,7 +29,7 @@ export function stripInert(command: string): string {
 		.join("\n")
 		.replace(/(^|[^\\])(['"])((?:\\.|(?!\2)[^\\])*)\2/g, (whole, before: string, quote: string, body: string, offset: number, all: string) => {
 			const lead = all.slice(Math.max(0, offset - 8), offset + before.length);
-			return /(^|\s)(-c|eval)\s*$/.test(lead) || !/\s/.test(body) ? whole : `${before}${quote}${quote}`;
+			return /(^|\s)(-[a-z]*c|eval)\s*$/.test(lead) || !/\s/.test(body) ? whole : `${before}${quote}${quote}`;
 		});
 }
 
@@ -38,6 +38,30 @@ function segments(command: string): string[] {
 		.split(SEPARATORS)
 		.map((s) => s.trim())
 		.filter(Boolean);
+}
+
+// Words that run the command after them (their own options are skipped).
+const WRAPPERS = new Set(["env", "command", "exec", "nohup", "time", "timeout", "nice", "setsid", "stdbuf", "sudo", "python", "python3", "bash", "sh", "zsh", "fish"]);
+
+/** True when a segment runs orca-wait itself, not a command that only looks at it. */
+function runsOrcaWait(segment: string): boolean {
+	const tokens = segment.split(/\s+/).map((t) => t.replace(/^["']|["']$/g, "")).filter(Boolean);
+	let i = 0;
+	while (i < tokens.length) {
+		const t = tokens[i];
+		const base = t.split("/").pop() ?? "";
+		if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(t) || t.startsWith("-")) {
+			// `command -v` / `-V` only locate the program.
+			if (tokens[i - 1] === "command" && /^-[vV]$/.test(t)) return false;
+			i++;
+		} else if (WRAPPERS.has(base)) {
+			i++;
+			if (base === "timeout" && /^\d/.test(tokens[i] ?? "")) i++;
+		} else {
+			return base === "orca-wait";
+		}
+	}
+	return false;
 }
 
 /** True when a segment invokes the orca CLI (bare, via path, or via env). */
@@ -53,7 +77,7 @@ function orcaSubcommand(segment: string): string[] | undefined {
 export function classifyOrcaCommand(command: string): OrcaCommandKind[] {
 	const kinds: OrcaCommandKind[] = [];
 	for (const segment of segments(command)) {
-		if (/(^|[\s/])orca-wait(\s|$)/.test(segment)) {
+		if (runsOrcaWait(segment)) {
 			kinds.push("consuming-check");
 			continue;
 		}

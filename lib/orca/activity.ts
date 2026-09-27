@@ -8,10 +8,33 @@ const BOX = /^[╭│╰]/;
 const RULE = /^[\s─━═-]+$/;
 const TOOL_NAME = /^ ([a-z][a-z0-9_]*)$/;
 const ACTION = /^(read|edit|write|grep|find|ls) \S/;
-const CHROME = [/^✿ /, /^ctrl\+\w to /i, /^↳ /, /^\s*=== TASK ===\s*$/];
+// Gentle Shell chrome, plus Pi's default "── ⠦ Working ──" spinner rule.
+const CHROME = [/^✿ /, /^ctrl\+\w to /i, /^↳ /, /^\s*=== TASK ===\s*$/, /^─{2,} .* ─{2,}$/];
 
 function isChrome(line: string): boolean {
 	return !line.trim() || BOX.test(line) || RULE.test(line) || CHROME.some((re) => re.test(line));
+}
+
+/**
+ * Pi's default TUI ends with the editor between two full-width rules, then a
+ * footer (cwd, token stats, status segments) written flush left, while the
+ * agent's own lines are indented. Cut from the editor down.
+ */
+function withoutPiFooter(tail: string[]): string[] {
+	let last = -1;
+	for (let i = tail.length - 1; i >= 0; i--) {
+		if (RULE.test(tail[i]) && tail[i].trim()) {
+			last = i;
+			break;
+		}
+	}
+	if (last < 0) return tail;
+	const footer = tail.slice(last + 1).filter((l) => l.trim());
+	if (footer.length > 6 || footer.some((l) => /^\s/.test(l) || BOX.test(l))) return tail;
+	for (let i = last - 1; i >= 0 && last - i <= 12; i--) {
+		if (RULE.test(tail[i]) && tail[i].trim()) return tail.slice(0, i);
+	}
+	return tail;
 }
 
 function tidy(text: string): string {
@@ -33,10 +56,11 @@ export function lastActivity(tail: string[]): string | undefined {
 		const m = /^│\s*▸\s+(.*?)\s*│\s*$/.exec(tail[i]);
 		if (m && m[1]) return `⏵ ${tidy(m[1])}`;
 	}
-	const lines = tail.filter((l) => !isChrome(l));
+	const lines = withoutPiFooter(tail).filter((l) => !isChrome(l));
 	// 2. The last tool action.
 	for (let i = lines.length - 1; i >= 0; i--) {
-		const line = lines[i];
+		// Pi's default TUI indents tool lines by one space.
+		const line = lines[i].replace(/^ (?=\$ |(?:read|edit|write|grep|find|ls) \S)/, "");
 		if (line.startsWith("$ ")) return tidy(line);
 		if (ACTION.test(line)) return tidy(line);
 		const tool = TOOL_NAME.exec(line);

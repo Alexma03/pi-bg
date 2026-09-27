@@ -62,10 +62,12 @@ test("worker-show gives agent, model and dispatch time (Orca UTC without zone)",
 		dispatch: { dispatchedAt: "2026-09-27 16:15:16", createdAt: "2026-09-27 16:15:10" },
 		worker: { startOptions: { agent: "pi", launch: { requested: { agent: "pi", model: null }, effective: { agent: "pi", model: "gpt-6-sol", effort: "high" } } } },
 	});
-	assert.deepEqual(detail, { agent: "pi", model: "gpt-6-sol", effort: "high", startedAt: Date.parse("2026-09-27T16:15:16Z") });
+	assert.deepEqual(detail, { agent: "pi", model: "gpt-6-sol", effort: "high", startedAt: Date.parse("2026-09-27T16:15:16Z"), reusedTerminal: false });
 	assert.equal(parseOrcaTime("2026-09-27T16:16:43.690Z"), Date.parse("2026-09-27T16:16:43.690Z"));
 	assert.equal(parseOrcaTime(null), null);
-	assert.deepEqual(parseWorkerShow({}), { agent: "", model: "", effort: "", startedAt: null });
+	assert.deepEqual(parseWorkerShow({}), { agent: "", model: "", effort: "", startedAt: null, reusedTerminal: false });
+	// Dispatched with --terminal: Orca did not launch the agent, so its model is unknown.
+	assert.equal(parseWorkerShow({ worker: { startOptions: { terminal: "term_x", agent: null, launch: { requested: {}, effective: {} } } } }).reusedTerminal, true);
 });
 
 test("a worker that ends its turn without worker_done is reported once after 3 minutes", () => {

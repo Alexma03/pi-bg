@@ -100,6 +100,8 @@ test("task notices are compact and name the log", () => {
 	assert.match(text, /log: \/tmp\/bg1.log/);
 	assert.match(formatNotice(notice({ exitCode: 2 })), /FAILED with exit 2/);
 	assert.match(formatNotice(notice({ kind: "match", pattern: "done", stillRunning: true, eventNumber: 1, maxEvents: 1 })), /matched \/done\/ after 4m12s · still running/);
+	assert.match(formatNotice(notice({ kind: "match", pattern: "done", stillRunning: false, stopped: true })), /matched \/done\/ after 4m12s · stopped/);
+	assert.match(formatNotice(notice({ kind: "match", pattern: "hit", stillRunning: false, eventNumber: 1, maxEvents: 2 })), /matched \/hit\/ \(event 1\/2\) after 4m12s · before it exited$/m, "each-mode flush at exit: the watch did not stop it");
 	assert.match(formatNotice(notice({ kind: "timeout" })), /hit its deadline/);
 	const many = formatNotices([notice({}), notice({ id: "bg2", label: "bg2" })]);
 	assert.match(many, /^pi-bg: 2 background task updates/);

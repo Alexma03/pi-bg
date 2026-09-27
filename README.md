@@ -19,7 +19,7 @@ Restart or `/reload` running sessions to pick it up.
 
 | Tool | What it does |
 | --- | --- |
-| `bg_run {command, cwd?, label?, timeout_s?, watch?}` | Starts `bash -c <command>` in its own process group and returns at once with an id and a log path. |
+| `bg_run {command, timeout_s, cwd?, label?, watch?}` | Starts `bash -c <command>` in its own process group and returns at once with an id and a log path. `timeout_s` is required (1 s to 24 h), and a missing `cwd` is refused before anything starts. |
 | `bg_status {id?}` | Lists tasks and their state. |
 | `bg_tail {id, lines?, grep?}` | Shows a bounded, sanitized and redacted tail of the log. |
 | `bg_cancel {id}` | TERM to the group, then KILL after 3 s. No completion notice follows. |
@@ -31,7 +31,7 @@ Restart or `/reload` running sessions to pick it up.
 - **Watch.** `watch: {pattern, flags?, mode?, keep_running?, max_events?}` tests each output line against a JavaScript regex.
   - `until` (the default) notifies on the first match and then stops the task, unless `keep_running` is set.
   - `each` notifies per match, coalesced over 2 s, up to `max_events` notices (default 20). The exit is always reported.
-  - Watches default to a 30-minute deadline. Plain tasks have no deadline unless `timeout_s` is set; the maximum is 24 h.
+- **Deadline.** Every task has one: `timeout_s` is required (1 s to 24 h), so a forgotten command cannot run away during a long Run. When it is reached the group is stopped and a timeout notice is sent.
 - **Lifetime.** Tasks never outlive the Pi runtime that started them.
   - `session_shutdown` (quit, `/reload`, new, resume, fork) terminates every group.
   - A `process.on("exit")` hook sends KILL as a fallback.
@@ -42,6 +42,8 @@ Restart or `/reload` running sessions to pick it up.
 ## Orca mailbox bridge
 
 The bridge is active only in an interactive Pi session inside an Orca terminal (`ORCA_TERMINAL_HANDLE` is set), and never in gentle subagent children. It works as follows.
+
+The coordinator tools (`orca_ack`, `orca_inbox`, `orca_workers`, `orca_watch`) are active in such a session from the start, even before a Run is bound. Some providers, such as claude-bridge, fix the tool list for a whole turn. Without this, a delivery that arrives in the same turn as `run-create` could not be acknowledged until the next turn. Without a Run the tools only answer that nothing is bound.
 
 1. **Detect.** At session start, and again after any bash `orca orchestration run-create|run-use`, the bridge runs `orca orchestration run-current`. While no Run is bound it re-checks every 2 minutes.
 2. **Wait.** It keeps exactly one `orca orchestration check --wait --json` child, **without `--types`**. Orca 1.4.212 does not type its "You have N orchestration messages" pointer while an unfiltered waiter exists, or while a delivery is outstanding. Both states are covered, so the pointer never appears.
@@ -109,10 +111,11 @@ A Pi session that receives an Orca worker preamble (`=== TASK ===` with `--task-
   - the bash call returns at once with "Moved to the background as bgN";
   - the command keeps running, and its ordinary pi-bg notice arrives when it ends;
   - the model reads the message right away instead of after the command.
-- A bash timeout or abort still stops the command.
+- Every attached command has a deadline, also after it moves to the background: the bash call's own `timeout`, or **30 s** when it has none (a call without a timeout is expected to be short). When it is reached the command is stopped and the model is told to rerun it with a larger `timeout`. `bg_status` shows each task's deadline.
+- A bash abort still stops the command.
 - `PI_BG_ATTACH=0` turns attaching off, and `PI_BG_WORKER_MAIL=0` turns the mail watch off.
 
-The coordinator tools (`orca_ack`, `orca_inbox`, `orca_workers`, `orca_watch`) are active only while this terminal is bound to a Run, so workers keep following their preamble's `check --terminal`. Gentle subagent children always get consuming checks blocked, because they share the lead's terminal identity.
+A dispatched worker loses the coordinator tools as soon as its preamble arrives, unless it binds a Run itself. It keeps following its preamble's `check --terminal`. Gentle subagent children always get consuming checks blocked, because they share the lead's terminal identity.
 
 ### UI
 

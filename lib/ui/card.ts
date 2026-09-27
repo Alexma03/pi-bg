@@ -190,7 +190,8 @@ export function buildOrcaCard(input: OrcaCardInput): CardModel | undefined {
 			const elapsed = detail?.startedAt != null ? formatDuration(Math.max(0, (t.settledAt ?? input.now) - detail.startedAt)) : "";
 			const human = r.ownership === "user_owned" ? " · lo manejas tú" : "";
 			const agent = detail?.agent || r.provider;
-			const model = detail?.model || (agent ? input.defaultModel?.(agent) : undefined);
+			// A reused terminal runs whatever its owner launched: do not guess.
+			const model = detail?.model || (agent && !detail?.reusedTerminal ? input.defaultModel?.(agent) : undefined);
 			const who = [agent, model ? `${model}${detail?.model ? "" : " (por defecto)"}${detail?.effort ? ` ${detail.effort}` : ""}` : ""].filter(Boolean).join(" · ");
 			rows.push({ text: `${look.mark} ${task?.title || r.taskId} · ${look.state}${elapsed ? ` · ${elapsed}` : ""}${who ? ` · ${who}` : ""}${human}`, ...(look.tone ? { tone: look.tone } : {}) });
 			if (seen) rows.push({ text: `  ↳ ${oneLine(seen.text)}`, tone: "muted" });

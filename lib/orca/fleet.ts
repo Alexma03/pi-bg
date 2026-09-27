@@ -89,6 +89,8 @@ export interface WorkerDetail {
 	effort: string;
 	/** When the worker was dispatched (ms epoch), if known. */
 	startedAt: number | null;
+	/** Dispatched into an existing terminal (`--terminal`): Orca did not launch the agent. */
+	reusedTerminal: boolean;
 }
 
 /** Orca prints SQLite UTC timestamps without a zone ("2026-09-27 16:15:16"). */
@@ -111,6 +113,7 @@ export function parseWorkerShow(result: Record<string, unknown>): WorkerDetail {
 		model: s(eff.model) || s(req.model),
 		effort: s(eff.effort) || s(req.effort),
 		startedAt: parseOrcaTime(dispatch.dispatchedAt) ?? parseOrcaTime(dispatch.createdAt) ?? parseOrcaTime(worker.createdAt),
+		reusedTerminal: Boolean(s(opts.terminal)),
 	};
 }
 

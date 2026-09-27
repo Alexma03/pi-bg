@@ -50,9 +50,13 @@ export function onInput(state: WorkerState, text: string): WorkerState {
 	return { ...state, reminders: 0, lastReminderAt: null };
 }
 
-/** True when a lifecycle command's tool result shows Orca accepted it. */
+/**
+ * True when a lifecycle command's tool result shows Orca accepted it: the
+ * `--json` envelope, or the plain `Sent msg_…` receipt printed without `--json`.
+ */
 export function acceptedByOrca(output: string, isError: boolean): boolean {
 	if (isError) return false;
+	if (/^Sent msg_[A-Za-z0-9]+\s*$/m.test(output)) return true;
 	return /"ok"\s*:\s*true/.test(output) && !/"ok"\s*:\s*false/.test(output);
 }
 

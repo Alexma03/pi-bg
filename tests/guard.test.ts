@@ -12,6 +12,11 @@ test("consuming checks are detected in any shape", () => {
 		"orca-wait --timeout-min 30",
 		"echo hi; ~/.local/bin/orca-wait",
 		"x=$(orca orchestration check --json)",
+		"timeout 600 orca-wait",
+		"env FOO=1 nohup orca-wait --timeout-min 5 &",
+		"python3 ~/.local/bin/orca-wait",
+		"bash -lc 'orca-wait --timeout-min 5'",
+		"X=1 orca-wait",
 	]) {
 		assert.ok(classifyOrcaCommand(cmd).includes("consuming-check"), cmd);
 	}
@@ -25,6 +30,10 @@ test("read-only checks and other orca verbs are allowed", () => {
 	assert.deepEqual(classifyOrcaCommand("orca orchestration worker-list --json"), ["other"]);
 	assert.deepEqual(classifyOrcaCommand("orca orchestration send --to run:r --body check"), ["other"]);
 	assert.deepEqual(classifyOrcaCommand("grep 'orchestration check' AGENTS.md"), ["other"]);
+	// Commands that only look at orca-wait do not run it.
+	for (const cmd of ["which orca-wait", "head -40 ~/.local/bin/orca-wait", "cat ~/.local/bin/orca-wait | wc -l", "command -v orca-wait", "ls ~/.local/bin/orca-wait*", "cp ~/.local/bin/orca-wait /tmp/"]) {
+		assert.deepEqual(classifyOrcaCommand(cmd), ["other"], cmd);
+	}
 });
 
 test("run binding commands are detected", () => {

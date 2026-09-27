@@ -18,6 +18,8 @@ export interface TaskNotice {
 	lines: string[];
 	/** Task keeps running after this notice (each-mode or keepRunning). */
 	stillRunning: boolean;
+	/** An until-watch stopped the task on this match. */
+	stopped?: boolean;
 	/** Extra context, e.g. "watch budget exhausted". */
 	note?: string;
 	pattern?: string;
@@ -41,7 +43,7 @@ export function noticeHeadline(n: TaskNotice): string {
 			return `task ${name} could not run`;
 		case "match": {
 			const counter = n.maxEvents && n.maxEvents > 1 ? ` (event ${n.eventNumber}/${n.maxEvents})` : "";
-			return `task ${name} matched /${clip(n.pattern ?? "", 80)}/${counter} after ${after}${n.stillRunning ? " · still running" : " · stopped"}`;
+			return `task ${name} matched /${clip(n.pattern ?? "", 80)}/${counter} after ${after}${n.stillRunning ? " · still running" : n.stopped ? " · stopped" : " · before it exited"}`;
 		}
 	}
 }

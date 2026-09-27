@@ -12,7 +12,7 @@ import { mkdir, open, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { ChildProcess } from "node:child_process";
 import { redact } from "../redact.ts";
-import { clip, lastLines, sanitizeTerminal } from "../text.ts";
+import { clip, formatDuration, lastLines, sanitizeTerminal } from "../text.ts";
 import { killGroup, spawnShell, terminateGroup } from "../spawn.ts";
 import { LineSplitter, Watcher, type WatchSpec } from "./watch.ts";
 import type { TaskNotice } from "./notice.ts";
@@ -53,6 +53,8 @@ export interface TaskSnapshot {
 	logError?: string;
 	/** Still followed by a foreground attach client (see TaskSpec.attached). */
 	attached?: boolean;
+	/** Deadline after which the group is stopped, if any. */
+	timeoutMs?: number;
 	/** Byte offset in the log where the command's output starts (after the header). */
 	outputOffset: number;
 }
@@ -165,6 +167,7 @@ export class TaskManager {
 				watchEvents: 0,
 				outputOffset: Buffer.byteLength(header),
 				...(spec.attached ? { attached: true } : {}),
+				...(spec.timeoutMs && spec.timeoutMs > 0 ? { timeoutMs: spec.timeoutMs } : {}),
 			},
 			child,
 			log,
@@ -229,7 +232,7 @@ export class TaskManager {
 		if (result.notify) {
 			task.snap.watchEvents = watcher.events;
 			const stop = !watcher.keepRunning;
-			this.emit(task, "match", result.notify, { stillRunning: !stop });
+			this.emit(task, "match", result.notify, { stillRunning: !stop, stopped: stop });
 			if (stop) {
 				task.quiet = true;
 				task.snap.status = "matched";
@@ -250,7 +253,7 @@ export class TaskManager {
 		this.emit(task, "match", lines, { stillRunning, note });
 	}
 
-	private emit(task: Task, kind: TaskNotice["kind"], lines: string[], extra: { stillRunning: boolean; note?: string }): void {
+	private emit(task: Task, kind: TaskNotice["kind"], lines: string[], extra: { stillRunning: boolean; stopped?: boolean; note?: string }): void {
 		const watcher = task.watcher;
 		this.deps.onNotice({
 			kind,
@@ -263,6 +266,7 @@ export class TaskManager {
 			signal: task.snap.signal,
 			lines,
 			stillRunning: extra.stillRunning,
+			...(extra.stopped ? { stopped: true } : {}),
 			...(extra.note ? { note: extra.note } : {}),
 			...(watcher ? { pattern: task.snap.watch?.pattern, eventNumber: watcher.events, maxEvents: watcher.mode === "each" ? watcher.maxEvents : 1 } : {}),
 		});
@@ -288,7 +292,9 @@ export class TaskManager {
 			task.snap.status = task.timedOut ? "timeout" : task.quiet ? "cancelled" : "exited";
 		}
 		if (task.snap.attached) {
-			const end = { state: "exit", code, signal };
+			// The foreground client prints this, so the model knows why its command died.
+			const error = task.timedOut ? `pi-bg: stopped at its ${formatDuration(task.snap.timeoutMs ?? 0)} deadline. If the command needs longer, run it again with a larger bash timeout (seconds).` : undefined;
+			const end = { state: "exit", code, signal, ...(error ? { error } : {}) };
 			if (task.snap.logError) void writeCtl(task.snap.logPath, end);
 			else task.log.once("close", () => void writeCtl(task.snap.logPath, end));
 		} else if (!task.quiet) {

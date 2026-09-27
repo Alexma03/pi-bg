@@ -9,6 +9,7 @@
 // purpose (it waits for the whole run to stop).
 
 import { readFileSync } from "node:fs";
+import { stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -50,8 +51,9 @@ const CARD_KEY = "pi-bg-card";
 const ORCA_CARD_KEY = "pi-bg-orca-card";
 const NOTICE_BATCH_MS = 400;
 const FLEET_BATCH_MS = 5_000;
-const WATCH_DEFAULT_TIMEOUT_S = 30 * 60;
 const MAX_TIMEOUT_S = 24 * 3600;
+/** A worker's bash call without its own timeout is expected to be short. */
+const ATTACH_DEFAULT_TIMEOUT_S = 30;
 const ORCA_TOOLS = ["orca_ack", "orca_inbox", "orca_workers", "orca_watch"];
 
 function stateDir(env: NodeJS.ProcessEnv): string {
@@ -74,13 +76,22 @@ function piDefaultModel(cwd: string): string | undefined {
 
 const clean = (text: string): string => redact(sanitizeTerminal(text));
 
+async function isDirectory(path: string): Promise<boolean> {
+	try {
+		return (await stat(path)).isDirectory();
+	} catch {
+		return false;
+	}
+}
+
 function describeTask(t: TaskSnapshot, now: number): string {
 	const age = formatDuration((t.endedAt ?? now) - t.startedAt);
 	const exit = t.status === "running" ? "" : t.signal ? ` (${t.signal})` : t.exitCode !== null ? ` (exit ${t.exitCode})` : "";
 	const watch = t.watch ? ` · watch /${clean(t.watch.pattern)}/ ${t.watch.mode ?? "until"}${t.watchEvents ? ` ${t.watchEvents} hit${t.watchEvents === 1 ? "" : "s"}` : ""}` : "";
 	const label = t.label !== t.id ? `"${clip(clean(t.label), 60)}" · ` : "";
 	const logError = t.logError ? ` · log error: ${t.logError}` : "";
-	return `${t.id} ${t.status}${exit} ${age} · ${label}${clip(clean(t.command), 120)}${watch}${logError}\n   log: ${t.logPath}`;
+	const deadline = t.timeoutMs ? `deadline ${formatDuration(t.timeoutMs)} · ` : "";
+	return `${t.id} ${t.status}${exit} ${age} · ${deadline}${label}${clip(clean(t.command), 120)}${watch}${logError}\n   log: ${t.logPath}`;
 }
 
 function textOf(content: unknown): string {
@@ -134,10 +145,16 @@ export default function piBg(pi: ExtensionAPI) {
 
 	const liveState = () => stateBlock({ now: now(), tasks: manager?.list() ?? [], orca: bridge?.state, fleet: fleet?.state, fleetIncomplete: fleet?.incomplete });
 
-	/** Orca coordinator tools exist only while a Run is bound (workers keep their preamble's `check`). */
+	/**
+	 * Orca coordinator tools are active in an Orca terminal from the start, so a
+	 * run-create in the middle of a turn can be acknowledged in that same turn:
+	 * some providers (claude-bridge) freeze the tool list for the whole turn.
+	 * A dispatched worker loses them unless it binds a Run itself; it keeps
+	 * its preamble's `check`.
+	 */
 	const syncOrcaTools = () => {
 		if (!orcaEnabled) return;
-		const want = bridgeOwnsMailbox() || bridge?.state.phase === "fenced";
+		const want = !worker.identity || bridgeOwnsMailbox() || bridge?.state.phase === "fenced";
 		if (orcaToolsActive === want) return;
 		orcaToolsActive = want;
 		try {
@@ -239,7 +256,8 @@ export default function piBg(pi: ExtensionAPI) {
 			wakeBudget = taken.budget;
 			trigger = taken.allowed;
 		}
-		const state = liveState();
+		// A notice that waits for the next turn would carry a stale snapshot.
+		const state = trigger ? liveState() : "";
 		const suffix = wake && !trigger ? "\n(Several fleet notices in a short time: this one did not start a turn.)" : "";
 		pi.sendMessage(
 			{
@@ -469,6 +487,7 @@ export default function piBg(pi: ExtensionAPI) {
 			const before = worker.identity?.dispatchId;
 			worker = onInput(worker, event.text ?? "");
 			if (worker.identity && worker.identity.dispatchId !== before) {
+				syncOrcaTools();
 				mail = initialMail();
 				setTimeout(() => void pollMail(), 2_000).unref?.();
 			}
@@ -494,7 +513,7 @@ export default function piBg(pi: ExtensionAPI) {
 
 	pi.on("tool_call", async (event, ctx) => {
 		if (event.toolName !== "bash") return;
-		const input = event.input as { command?: unknown };
+		const input = event.input as { command?: unknown; timeout?: unknown };
 		const command = String(input.command ?? "");
 		if (classifyOrcaCommand(command).includes("consuming-check")) {
 			if (inOrcaTerminal && gentleChild) {
@@ -508,7 +527,10 @@ export default function piBg(pi: ExtensionAPI) {
 		if (!workerActive() || !manager || env.PI_BG_ATTACH === "0" || !attachable(command)) return;
 		try {
 			const firstLine = command.split("\n")[0];
-			const snap = await manager.start({ command, cwd: ctx.cwd, label: `bash · ${firstLine.slice(0, 60)}`, attached: true });
+			// The bash call's own timeout still applies once the command moves to the
+			// background; without one it is a short command and gets ATTACH_DEFAULT_TIMEOUT_S.
+			const timeoutS = typeof input.timeout === "number" && input.timeout > 0 ? input.timeout : ATTACH_DEFAULT_TIMEOUT_S;
+			const snap = await manager.start({ command, cwd: ctx.cwd, label: `bash · ${firstLine.slice(0, 60)}`, attached: true, timeoutMs: timeoutS * 1000 });
 			attachedCalls.set(event.toolCallId, snap.id);
 			input.command = `# pi-bg ${snap.id} (moves to the background if your coordinator writes): ${firstLine.slice(0, 200)}\n${attachCommand(process.execPath, ATTACH_CLIENT, snap.logPath, snap.outputOffset, snap.id)}`;
 		} catch {
@@ -579,7 +601,7 @@ export default function piBg(pi: ExtensionAPI) {
 			"Start a shell command in the background and return immediately. Use it for anything that may take more than about a minute: verification gates, test suites, builds, CI watches (`gh run watch`, `gh pr checks --watch`), deploys, log tails, production watchers. " +
 			"Output goes to a log file. When the command exits you receive a 'pi-bg' message automatically (the session wakes if idle), so do not poll or sleep: keep working, or end your turn. " +
 			"Optional watch: notify when an output line matches a regex, either once (`until`, stops the task unless keep_running) or for each match (`each`, coalesced, capped by max_events). " +
-			"Watches default to a 30 minute deadline. Tasks, including anything they start in the background, are killed when they end, when the session exits or reloads.",
+			"timeout_s is required: pick the longest the command may reasonably take (up to 24 h); the task is stopped and reported when it is reached. Tasks, including anything they start in the background, are killed when they end, when the session exits or reloads.",
 		promptSnippet: "bg_run: run long commands in the background; you are notified when they finish or match a watch pattern.",
 		promptGuidelines: [
 			"Use bg_run instead of a blocking bash call for commands that can take more than about a minute (verify gates, builds, `gh run watch`, deploys, log watches). After starting one, continue with other work or end the turn; its completion arrives as a 'pi-bg' message. Never loop with sleep to wait for it.",
@@ -590,7 +612,7 @@ export default function piBg(pi: ExtensionAPI) {
 				command: Type.String({ description: "Shell command line, run with bash -c." }),
 				cwd: Type.Optional(Type.String({ description: "Working directory; defaults to the session cwd." })),
 				label: Type.Optional(Type.String({ description: "Short human label, e.g. 'serverful verify'." })),
-				timeout_s: Type.Optional(Type.Integer({ minimum: 0, maximum: MAX_TIMEOUT_S, description: "Deadline in seconds; the task is stopped and reported when reached. 0 = none. Default: none, or 1800 with watch." })),
+				timeout_s: Type.Integer({ minimum: 1, maximum: MAX_TIMEOUT_S, description: "Required deadline in seconds (1 to 86400); the task is stopped and reported when reached." }),
 				watch: Type.Optional(
 					Type.Object(
 						{
@@ -610,15 +632,18 @@ export default function piBg(pi: ExtensionAPI) {
 		async execute(_id, params, _signal, _onUpdate, ctx) {
 			ctxRef = ctx;
 			if ((bridgeOwnsMailbox() || (inOrcaTerminal && gentleChild)) && classifyOrcaCommand(params.command).includes("consuming-check")) throw new Error(BLOCK_REASON);
-			const timeoutS = params.timeout_s ?? (params.watch ? WATCH_DEFAULT_TIMEOUT_S : 0);
+			const timeoutS = params.timeout_s;
+			if (!Number.isInteger(timeoutS) || timeoutS < 1 || timeoutS > MAX_TIMEOUT_S) throw new Error(`timeout_s is required: an integer from 1 to ${MAX_TIMEOUT_S} seconds.`);
+			const cwd = params.cwd || ctx.cwd;
+			if (!(await isDirectory(cwd))) throw new Error(`cwd ${cwd} does not exist or is not a directory.`);
 			const task = await need().start({
 				command: params.command,
-				cwd: params.cwd || ctx.cwd,
+				cwd,
 				label: params.label,
-				timeoutMs: timeoutS > 0 ? timeoutS * 1000 : undefined,
+				timeoutMs: timeoutS * 1000,
 				watch: params.watch ? { pattern: params.watch.pattern, flags: params.watch.flags, mode: params.watch.mode, keepRunning: params.watch.keep_running, maxEvents: params.watch.max_events } : undefined,
 			});
-			const deadline = timeoutS > 0 ? ` · deadline ${formatDuration(timeoutS * 1000)}` : "";
+			const deadline = ` · deadline ${formatDuration(timeoutS * 1000)}`;
 			return {
 				content: [{ type: "text", text: `Started ${task.id}${task.label !== task.id ? ` "${clip(clean(task.label), 60)}"` : ""} (pid ${task.pid})${deadline}.\nlog: ${task.logPath}\nYou will get a pi-bg message when it ${params.watch ? "matches or " : ""}exits; keep working or end the turn.` }],
 				details: { id: task.id, logPath: task.logPath },
@@ -677,7 +702,7 @@ export default function piBg(pi: ExtensionAPI) {
 		},
 	});
 
-	// ---- Orca coordinator tools (active only while a Run is bound) --------
+	// ---- Orca coordinator tools (hidden only in dispatched workers) --------
 
 	if (orcaEnabled) {
 		pi.registerTool({

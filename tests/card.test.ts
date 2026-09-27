@@ -76,8 +76,8 @@ test("orca card names the Run by objective and shows each agent: task, state, ti
 	let fleet = updateFleet(initialFleet(), [worker("a", { activity: "done" }), worker("b")], tasks, 0).state;
 	fleet = updateFleet(fleet, [worker("a", { activity: "done" }), worker("b")], undefined, 5 * 60_000).state;
 	const details = new Map([
-		["a", { agent: "pi", model: "", effort: "", startedAt: 0 }],
-		["b", { agent: "codex", model: "gpt-6-sol", effort: "high", startedAt: 60_000 }],
+		["a", { agent: "pi", model: "", effort: "", startedAt: 0, reusedTerminal: false }],
+		["b", { agent: "codex", model: "gpt-6-sol", effort: "high", startedAt: 60_000, reusedTerminal: false }],
 	]);
 	const activity = new Map([["a", { text: "$ pnpm test", since: 0 }], ["b", { text: "⏵ bg1 espera 3 min · 1m30s", since: 0 }]]);
 	const card = buildOrcaCard({ now: 5 * 60_000, orca, fleet, objective: "Lab visual", details, activity, defaultModel: (agent) => (agent === "pi" ? "claude-opus-5-5" : undefined) });
@@ -92,6 +92,8 @@ test("orca card names the Run by objective and shows each agent: task, state, ti
 		"  ↳ ⏵ bg1 espera 3 min · 1m30s",
 	]);
 	assert.doesNotMatch(text.join("\n"), /Lee el README|Corre los tests/, "the launch prompt is not shown");
+	const reused = buildOrcaCard({ now: 5 * 60_000, orca, fleet, objective: "Lab visual", details: new Map([["a", { agent: "", model: "", effort: "", startedAt: 0, reusedTerminal: true }]]), activity, defaultModel: () => "claude-opus-5-5" });
+	assert.match(reused!.rows[0].text, / · pi$/, "no guessed default model for a worker dispatched into an existing terminal");
 	assert.equal(card.rows[1].tone, "muted");
 	assert.doesNotMatch(text.join("\n"), /run_8da5|delivery|listening/);
 	const lines = renderCardLines(card, plainTheme, 60);

@@ -45,6 +45,13 @@ test("no reminder while busy, on aborted turns, after an accepted worker_done, o
 	assert.equal(reminderFor(s, settle(0)).text, undefined);
 });
 
+test("a worker_done sent without --json counts when Orca prints its plain 'Sent msg_…' receipt", () => {
+	assert.equal(acceptedByOrca("Sent msg_1462ba5bf442\n", false), true);
+	assert.equal(acceptedByOrca("/bin/bash: line 1: x: command not found\nSent msg_1462ba5bf442\n", false), true, "noise from the shell does not hide the receipt");
+	assert.equal(acceptedByOrca("Sent msg_1462ba5bf442\n", true), false, "a failed tool call never counts");
+	assert.equal(acceptedByOrca("echo Sent msg_x is what we expect", false), false, "only a receipt line counts");
+});
+
 test("a worker_done for another dispatch does not count; a new preamble resets", () => {
 	let s = onInput(initialWorker(), PREAMBLE);
 	s = onLifecycleResult(s, ["worker-done"], "orca orchestration send --type worker_done --task-id task_other --dispatch-id ctx_other", true);
