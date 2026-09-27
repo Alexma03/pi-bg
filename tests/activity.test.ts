@@ -37,6 +37,25 @@ test("otherwise the last tool action: bash, file tools, named tools", () => {
 	assert.equal(lastActivity(tool), 'bg_run · Started bg1 "espera 2 minutos" (pid 1).');
 });
 
+test("a tool call still being written ('write ...', '$ ...') is described in words, with what the agent last said", () => {
+	// Captured with worker-read from Gentle Shell workers of a real Run.
+	const write = [
+		"$ cd /x/foundation-schema && grep -n \"^CREATE TABLE\" schema.sql (timeout 30s)",
+		"288:CREATE INDEX sr_isin   ON screener_row (isin);",
+		"ctrl+o to expand",
+		" I confirm the fund_share_class_fund index was already dropped in migration 0033. Now I'm ready to write up",
+		" Exploration is done. Writing the report now.",
+		"write ...",
+		...CHROME_END,
+	];
+	assert.equal(lastActivity(write), "escribiendo un fichero · Exploration is done. Writing the report now.");
+	assert.equal(lastActivity([" Compruebo el esquema.", " $ ...", ...CHROME_END]), "preparando un comando · Compruebo el esquema.");
+	assert.equal(lastActivity(["edit …", ...CHROME_END]), "editando un fichero", "no narration: the words alone");
+	assert.equal(lastActivity(["read ~/x.md", "# x", " Ahora escribo.", "write ...", ...CHROME_END]), "escribiendo un fichero · Ahora escribo.");
+	// A real path or command is still shown as is.
+	assert.equal(lastActivity(["write /tmp/report.md", ...CHROME_END]), "write /tmp/report.md");
+});
+
 test("Pi's default TUI: the editor rules, cwd, token stats and status segments are chrome", () => {
 	// Captured with worker-read from a plain `pi` worker (no Gentle Shell).
 	const RULE_LINE = "─".repeat(120);

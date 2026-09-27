@@ -2,12 +2,26 @@
 // (`orca orchestration worker-read`). Orca has no structured transcript for
 // every agent, so this is a display-only heuristic over the rendered TUI:
 // drop chrome, then prefer a running background task, then the last tool
-// action, then the last line the agent wrote. Pure.
+// action (described in words while its arguments are still being written),
+// then the last line the agent wrote. Pure.
 
 const BOX = /^[╭│╰]/;
 const RULE = /^[\s─━═-]+$/;
 const TOOL_NAME = /^ ([a-z][a-z0-9_]*)$/;
 const ACTION = /^(read|edit|write|grep|find|ls) \S/;
+// A tool call whose arguments are still being written: "write ...", "$ ...".
+const PENDING = /^(\$|read|edit|write|grep|find|ls) (?:\.\.\.|…)\s*$/;
+const PENDING_WORDS: Record<string, string> = {
+	$: "preparando un comando",
+	read: "leyendo un fichero",
+	edit: "editando un fichero",
+	write: "escribiendo un fichero",
+	grep: "buscando en ficheros",
+	find: "buscando ficheros",
+	ls: "listando un directorio",
+};
+// What the agent says is written with one leading space, unlike tool output.
+const NARRATION = /^ \S/;
 // Gentle Shell chrome, plus Pi's default "── ⠦ Working ──" spinner rule.
 const CHROME = [/^✿ /, /^ctrl\+\w to /i, /^↳ /, /^\s*=== TASK ===\s*$/, /^─{2,} .* ─{2,}$/];
 
@@ -66,6 +80,21 @@ export function lastActivity(tail: string[]): string | undefined {
 	for (let i = lines.length - 1; i >= 0; i--) {
 		// Pi's default TUI indents tool lines by one space.
 		const line = lines[i].replace(/^ (?=\$ |(?:read|edit|write|grep|find|ls) \S)/, "");
+		const pending = PENDING.exec(line);
+		if (pending) {
+			// Say it in words, plus what the agent said just before (back to its previous tool call).
+			let said = "";
+			for (let j = i - 1; j >= 0; j--) {
+				const prev = lines[j].replace(/^ (?=\$ |(?:read|edit|write|grep|find|ls) \S)/, "");
+				if (prev.startsWith("$ ") || ACTION.test(prev) || TOOL_NAME.test(prev)) break;
+				if (NARRATION.test(lines[j])) {
+					said = tidy(lines[j]);
+					break;
+				}
+			}
+			const words = PENDING_WORDS[pending[1]];
+			return said ? `${words} · ${said.length > 160 ? `${said.slice(0, 159)}…` : said}` : words;
+		}
 		if (line.startsWith("$ ")) return tidy(line);
 		if (ACTION.test(line)) return tidy(line);
 		const tool = TOOL_NAME.exec(line);
