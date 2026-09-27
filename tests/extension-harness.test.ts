@@ -175,3 +175,65 @@ test("worker reminder: a completed turn without worker_done gets one continuatio
 		await f.fire("session_shutdown");
 	});
 });
+
+test("worker mail: a coordinator message detaches the running command and reaches the model", async () => {
+	const state = await mkdtemp(join(tmpdir(), "pi-bg-state-"));
+	const dir = await fakeOrcaDir(null);
+	await withEnv({ ORCA_TERMINAL_HANDLE: "term_worker", GENTLE_PI_AGENTS_CHILD: undefined, PI_BG_STATE_DIR: state, PI_BG_ORCA_BIN: FAKE, FAKE_ORCA_DIR: dir }, async () => {
+		const { spawn } = await import("node:child_process");
+		const f = fakePi();
+		piBg(f.pi as never);
+		await f.fire("session_start");
+		// Orca types the preamble; the first mail peek runs ~2 s later.
+		await f.fire("input", { text: "orca orchestration send --from term_worker --type worker_done --task-id task_abc --dispatch-id ctx_abc\n=== TASK ===\nDo X" });
+		// Lifecycle commands stay in the foreground; ordinary ones are attached.
+		const orcaCall = { toolName: "bash", toolCallId: "c0", input: { command: "orca orchestration send --type status --task-id task_abc" } };
+		await f.fire("tool_call", orcaCall);
+		assert.equal(orcaCall.input.command, "orca orchestration send --type status --task-id task_abc");
+		const call = { toolName: "bash", toolCallId: "c1", input: { command: "echo empieza; sleep 20; echo fin" } };
+		await f.fire("tool_call", call);
+		assert.match(call.input.command, /^# pi-bg bg1 \(moves to the background if your coordinator writes\): echo empieza; sleep 20; echo fin\nexec /);
+		// Stand in for the bash tool: run the rewritten command.
+		const started = Date.now();
+		const bash = spawn("bash", ["-c", call.input.command], { stdio: ["ignore", "pipe", "pipe"] });
+		let out = "";
+		bash.stdout.on("data", (d) => (out += d));
+		const exited = new Promise<number | null>((resolve) => bash.on("close", resolve));
+		await sleep(500);
+		await writeFile(join(dir, "queue", "0001.json"), JSON.stringify({ ok: true, result: { runId: "run_fake", messages: [{ id: "msg_1", type: "status", from_handle: "term_coord", subject: "Cambio de plan", body: "Para y revisa solo el README." }], count: 1 } }));
+		await until(() => f.sent.some((s) => s.message.customType === "pi-bg-worker-mail"), 6_000);
+		const code = await exited;
+		assert.equal(code, 0);
+		assert.ok(Date.now() - started < 5_000, "the bash call returned long before the 20 s command");
+		assert.match(out, /^empieza\n/);
+		assert.match(out, /Moved to the background as bg1/);
+		const mail = f.sent.find((s) => s.message.customType === "pi-bg-worker-mail")!;
+		assert.deepEqual(mail.options, { deliverAs: "steer", triggerTurn: true });
+		assert.match(mail.message.content, /your coordinator sent 1 new message/);
+		assert.match(mail.message.content, /status: Cambio de plan\n {2}Para y revisa solo el README\./);
+		assert.match(mail.message.content, /moved to the background as bg1/);
+		assert.match(mail.message.content, /check --terminal term_worker --json/);
+		// The call ended detached: the command keeps running.
+		await f.fire("tool_execution_end", { toolCallId: "c1", toolName: "bash", result: {}, isError: false });
+		const status = await f.tools.get("bg_status")!.execute("s", {}, undefined, undefined, f.ctx);
+		assert.match(status.content[0].text ?? "", /bg1.*running/);
+		await f.fire("session_shutdown");
+	});
+});
+
+test("worker attach: an aborted or timed-out bash call cancels its attached command", async () => {
+	const state = await mkdtemp(join(tmpdir(), "pi-bg-state-"));
+	const dir = await fakeOrcaDir(null);
+	await withEnv({ ORCA_TERMINAL_HANDLE: "term_worker", GENTLE_PI_AGENTS_CHILD: undefined, PI_BG_STATE_DIR: state, PI_BG_ORCA_BIN: FAKE, FAKE_ORCA_DIR: dir }, async () => {
+		const f = fakePi();
+		piBg(f.pi as never);
+		await f.fire("session_start");
+		await f.fire("input", { text: "orca orchestration send --from term_worker --task-id task_abc --dispatch-id ctx_abc\n=== TASK ===\nDo X" });
+		const call = { toolName: "bash", toolCallId: "c1", input: { command: "sleep 30" } };
+		await f.fire("tool_call", call);
+		await f.fire("tool_execution_end", { toolCallId: "c1", toolName: "bash", result: {}, isError: true });
+		const status = await f.tools.get("bg_status")!.execute("s", {}, undefined, undefined, f.ctx);
+		assert.match(status.content[0].text ?? "", /bg1.*cancelled/);
+		await f.fire("session_shutdown");
+	});
+});

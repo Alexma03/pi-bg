@@ -106,7 +106,8 @@ export function buildBgCard(input: BgCardInput): CardModel | undefined {
 		const name = t.label !== t.id ? `${t.id} ${t.label}` : t.id;
 		if (t.status === "running") {
 			const last = input.lastLines?.get(t.id);
-			rows.push({ text: `▸ ${name} · ${age}${last ? ` · ${last}` : ""}` });
+			// "$": a foreground command a worker is running (attached); "▸": background work.
+			rows.push({ text: `${t.attached ? "$" : "▸"} ${name} · ${age}${last ? ` · ${last}` : ""}` });
 		} else {
 			const o = taskOutcome(t);
 			rows.push({ text: `${o.mark} ${name} · ${o.text} · ${age}`, tone: o.tone });

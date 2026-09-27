@@ -8,7 +8,7 @@
 // wrapper's watchdog covers a Pi crash.
 
 import { createWriteStream, type WriteStream } from "node:fs";
-import { mkdir, open } from "node:fs/promises";
+import { mkdir, open, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { ChildProcess } from "node:child_process";
 import { redact } from "../redact.ts";
@@ -26,6 +26,12 @@ export interface TaskSpec {
 	/** Deadline; undefined means none. */
 	timeoutMs?: number;
 	watch?: WatchSpec;
+	/**
+	 * A foreground command followed by an attach client (the bash tool): no
+	 * notice while attached; its end is written to `<log>.ctl` for the client.
+	 * `detach()` turns it into an ordinary background task.
+	 */
+	attached?: boolean;
 }
 
 export interface TaskSnapshot {
@@ -45,6 +51,10 @@ export interface TaskSnapshot {
 	watchEvents: number;
 	/** Set when the log file could not be opened or written. */
 	logError?: string;
+	/** Still followed by a foreground attach client (see TaskSpec.attached). */
+	attached?: boolean;
+	/** Byte offset in the log where the command's output starts (after the header). */
+	outputOffset: number;
 }
 
 export interface ManagerDeps {
@@ -134,7 +144,8 @@ export class TaskManager {
 			}
 		});
 		const startedAt = this.deps.now();
-		log.write(`# pi-bg ${id} · started ${new Date(startedAt).toISOString()} · cwd ${spec.cwd}\n# $ ${spec.command}\n`);
+		const header = `# pi-bg ${id} · started ${new Date(startedAt).toISOString()} · cwd ${spec.cwd}\n# $ ${spec.command}\n`;
+		log.write(header);
 		const child = spawnShell(spec.command, { cwd: spec.cwd, env: { ...(this.deps.env ?? process.env), PI_BG_TASK_ID: id } });
 		const task: Task = {
 			snap: {
@@ -152,6 +163,8 @@ export class TaskManager {
 				bytes: 0,
 				watch: spec.watch,
 				watchEvents: 0,
+				outputOffset: Buffer.byteLength(header),
+				...(spec.attached ? { attached: true } : {}),
 			},
 			child,
 			log,
@@ -259,7 +272,8 @@ export class TaskManager {
 		if (task.done) return;
 		this.finish(task);
 		task.snap.status = "failed";
-		if (!task.quiet) this.emit(task, "error", [clip(error.message, 400)], { stillRunning: false });
+		if (task.snap.attached) void writeCtl(task.snap.logPath, { state: "exit", code: 127, signal: null, error: clip(error.message, 400) });
+		else if (!task.quiet) this.emit(task, "error", [clip(error.message, 400)], { stillRunning: false });
 		this.changed();
 	}
 
@@ -273,7 +287,11 @@ export class TaskManager {
 		if (task.snap.status === "running") {
 			task.snap.status = task.timedOut ? "timeout" : task.quiet ? "cancelled" : "exited";
 		}
-		if (!task.quiet) {
+		if (task.snap.attached) {
+			const end = { state: "exit", code, signal };
+			if (task.snap.logError) void writeCtl(task.snap.logPath, end);
+			else task.log.once("close", () => void writeCtl(task.snap.logPath, end));
+		} else if (!task.quiet) {
 			// Redact before splitting so multiline secrets (PEM blocks) match.
 			const lines = lastLines(redact(sanitizeTerminal(task.tail)), this.deps.noticeLines ?? 15);
 			const notes = [
@@ -316,6 +334,19 @@ export class TaskManager {
 		const lines = redact(sanitizeTerminal(task.tail.slice(-2_000))).split("\n").filter((l) => l.trim());
 		const last = lines.at(-1);
 		return last === undefined ? undefined : clip(last.trim(), 120);
+	}
+
+	/**
+	 * Let an attached task keep running in the background: its attach client
+	 * returns now, and the ordinary exit notice follows when it ends.
+	 */
+	detach(id: string): TaskSnapshot | undefined {
+		const task = this.tasks.get(id);
+		if (!task || task.done || !task.snap.attached) return undefined;
+		task.snap.attached = false;
+		void writeCtl(task.snap.logPath, { state: "detached", id });
+		this.changed();
+		return { ...task.snap };
 	}
 
 	/** Stop a running task. No notice is sent; the caller reports it. */
@@ -378,5 +409,20 @@ async function readTailBytes(path: string, maxBytes: number): Promise<string> {
 		return start > 0 ? text.slice(text.indexOf("\n") + 1) : text;
 	} finally {
 		await handle.close();
+	}
+}
+
+/** Control file read by the attach client (lib/tasks/attach-client.mjs). */
+export function ctlPath(logPath: string): string {
+	return `${logPath}.ctl`;
+}
+
+async function writeCtl(logPath: string, data: Record<string, unknown>): Promise<void> {
+	try {
+		const path = ctlPath(logPath);
+		await writeFile(`${path}.tmp`, JSON.stringify(data), { mode: 0o600 });
+		await rename(`${path}.tmp`, path);
+	} catch {
+		/* the client falls back to its own checks */
 	}
 }

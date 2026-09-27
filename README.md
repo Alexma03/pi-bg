@@ -52,7 +52,7 @@ The bridge is active only in an interactive Pi session inside an Orca terminal (
    - The bridge runs a synchronous `check --ack`. If Orca already holds the next batch, it is returned inline in the tool result.
    - Otherwise the waiter is re-armed.
    - A single reminder is sent if a delivery stays pending for more than 10 minutes.
-6. **Guard.** While the bridge is active, a consuming `orca orchestration check` or `orca-wait` in the bash tool is blocked, with an explanation. `check --peek` and `check --all` stay allowed.
+6. **Guard.** While the bridge is active, a consuming `orca orchestration check` or `orca-wait` in the bash tool is blocked, with an explanation. `check --peek`, `check --all` and `--help` stay allowed. Text that only mentions a check, in a heredoc body or a quoted string, is not blocked.
 7. **Failures.** Errors never cause a silent double delivery.
 
    | Failure | Behaviour |
@@ -99,6 +99,17 @@ A Pi session that receives an Orca worker preamble (`=== TASK ===` with `--task-
 - Reminders are limited to 2 per input, at least 10 min apart.
 - There is no reminder while bg tasks run or messages are queued, or after the user aborts the turn.
 
+**Coordinator mail.** Orca does not interrupt a busy worker: `send --to dispatch:<id>` only enqueues, and the worker sees it only when it runs `check`. pi-bg closes that gap for dispatched Pi workers until they send `worker_done`:
+
+- It peeks the worker's own mailbox every 15 s (`check --terminal <handle> --peek`, read-only, so nothing is marked read).
+- On new coordinator mail it sends the model a steer message with the messages and the exact `check` to run, which marks them read. If the mail stays unread, it reminds up to 2 times, 5 min apart.
+- **Blocking commands move to the background.** A worker's bash commands, except `orca …` lifecycle calls, run as *attached* pi-bg tasks: the bash tool runs a small attach client that streams the output and returns the exit code as usual. When mail arrives, pi-bg detaches them:
+  - the bash call returns at once with "Moved to the background as bgN";
+  - the command keeps running, and its ordinary pi-bg notice arrives when it ends;
+  - the model reads the message right away instead of after the command.
+- A bash timeout or abort still stops the command.
+- `PI_BG_ATTACH=0` turns attaching off, and `PI_BG_WORKER_MAIL=0` turns the mail watch off.
+
 The coordinator tools (`orca_ack`, `orca_inbox`, `orca_workers`, `orca_watch`) are active only while this terminal is bound to a Run, so workers keep following their preamble's `check --terminal`. Gentle subagent children always get consuming checks blocked, because they share the lead's terminal identity.
 
 ### UI
@@ -124,6 +135,8 @@ The coordinator tools (`orca_ack`, `orca_inbox`, `orca_workers`, `orca_watch`) a
 | `PI_BG_ORCA=0` | Background tasks only; no Orca bridge or tools. |
 | `PI_BG_ORCA_BIN` | Path of the `orca` CLI (default `orca` on PATH). |
 | `PI_BG_CARD=off` | Start with the card hidden. |
+| `PI_BG_WORKER_MAIL=0` | Workers do not watch their mailbox for coordinator mail. |
+| `PI_BG_ATTACH=0` | Workers run bash commands the ordinary way (no detaching). |
 | `PI_BG_STATE_DIR` | State root (default `$XDG_STATE_HOME/pi-bg` or `~/.local/state/pi-bg`). |
 
 ## Development

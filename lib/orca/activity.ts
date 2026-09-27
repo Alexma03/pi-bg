@@ -6,7 +6,7 @@
 
 const BOX = /^[╭│╰]/;
 const RULE = /^[\s─━═-]+$/;
-const TOOL_NAME = /^\s?([a-z][a-z0-9_]*)$/;
+const TOOL_NAME = /^ ([a-z][a-z0-9_]*)$/;
 const ACTION = /^(read|edit|write|grep|find|ls) \S/;
 const CHROME = [/^✿ /, /^ctrl\+\w to /i, /^↳ /, /^\s*=== TASK ===\s*$/];
 
@@ -16,6 +16,7 @@ function isChrome(line: string): boolean {
 
 function tidy(text: string): string {
 	return text
+		.replace(/^\$ # pi-bg bg\d+ \([^)]*\): /, "$ ")
 		.replace(/\s*\(\+\d+ lines?\)\s*$/, "")
 		.replace(/\s*\(timeout \d+s\)\s*$/, "")
 		.replace(/\s+/g, " ")
@@ -24,8 +25,11 @@ function tidy(text: string): string {
 
 /** The latest activity of a worker from its terminal tail, or undefined. */
 export function lastActivity(tail: string[]): string | undefined {
-	// 1. A background task the worker is waiting on (its own pi-bg card).
+	// 1. Its own pi-bg card: a foreground command it runs ("$", with its live
+	//    last output line) or a background task it waits on ("▸").
 	for (let i = tail.length - 1; i >= 0; i--) {
+		const fg = /^│\s*\$\s+bg\d+ bash · (.*?)\s*│\s*$/.exec(tail[i]);
+		if (fg && fg[1]) return `$ ${tidy(fg[1])}`;
 		const m = /^│\s*▸\s+(.*?)\s*│\s*$/.exec(tail[i]);
 		if (m && m[1]) return `⏵ ${tidy(m[1])}`;
 	}

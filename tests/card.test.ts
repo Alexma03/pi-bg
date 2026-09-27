@@ -21,6 +21,7 @@ const task = (id: string, extra: Partial<TaskSnapshot> = {}): TaskSnapshot => ({
 	bytes: 0,
 	watch: undefined,
 	watchEvents: 0,
+	outputOffset: 0,
 	...extra,
 });
 

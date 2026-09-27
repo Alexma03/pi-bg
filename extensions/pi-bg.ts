@@ -11,6 +11,7 @@
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Text, type TUI } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
@@ -20,6 +21,9 @@ import { FleetWatch } from "../lib/orca/fleet-driver.ts";
 import { formatFleetNotice, formatWorkersTable, shouldWake } from "../lib/orca/fleet-format.ts";
 import type { FleetEvent, FleetState, WatchOn } from "../lib/orca/fleet.ts";
 import { BLOCK_REASON, classifyOrcaCommand } from "../lib/orca/guard.ts";
+import { extractJson } from "../lib/orca/cli.ts";
+import { runOrcaCli } from "../lib/orca/exec.ts";
+import { attachable, attachCommand, decideMail, formatMailNotice, initialMail, parsePeek, type MailState } from "../lib/orca/worker-mail.ts";
 import { acceptedByOrca, initialWorker, onInput, onLifecycleResult, reminderFor, type WorkerState } from "../lib/orca/worker.ts";
 import { redact } from "../lib/redact.ts";
 import { stateBlock } from "../lib/state-block.ts";
@@ -35,6 +39,9 @@ const TASK_MESSAGE = "pi-bg-task";
 const ORCA_MESSAGE = "pi-bg-orca";
 const FLEET_MESSAGE = "pi-bg-fleet";
 const WORKER_MESSAGE = "pi-bg-worker";
+const MAIL_MESSAGE = "pi-bg-worker-mail";
+const MAIL_POLL_MS = 15_000;
+const ATTACH_CLIENT = fileURLToPath(new URL("../lib/tasks/attach-client.mjs", import.meta.url));
 const WATCH_ENTRY = "pi-bg-watch";
 const FLEET_SEEN_ENTRY = "pi-bg-fleet-seen";
 const STATUS_KEY = "pi-bg";
@@ -115,6 +122,11 @@ export default function piBg(pi: ExtensionAPI) {
 	let cardTui: TUI | undefined;
 	let cardMode: "on" | "collapsed" | "off" = env.PI_BG_CARD === "off" ? "off" : "on";
 	let orcaToolsActive: boolean | undefined;
+	let mail: MailState = initialMail();
+	let mailTimer: ReturnType<typeof setInterval> | undefined;
+	let mailPolling = false;
+	/** bash tool calls whose command runs as an attached pi-bg task. */
+	const attachedCalls = new Map<string, string>();
 	let active = false;
 
 	const now = () => Date.now();
@@ -249,6 +261,49 @@ export default function piBg(pi: ExtensionAPI) {
 		}
 	};
 
+	// ---- Orca worker side: coordinator mail ---------------------------------
+
+	/** A dispatched worker still owes its Task: follow-ups matter and blocking commands can be detached. */
+	const workerActive = (): boolean => orcaEnabled && Boolean(worker.identity) && !worker.doneSent && env.PI_BG_WORKER_MAIL !== "0";
+
+	/** Move every attached command to the background so the model can read new mail. */
+	const detachAll = (): Array<{ id: string; command: string }> => {
+		const moved: Array<{ id: string; command: string }> = [];
+		for (const id of attachedCalls.values()) {
+			const snap = manager?.detach(id);
+			if (snap) moved.push({ id: snap.id, command: snap.command });
+		}
+		return moved;
+	};
+
+	const pollMail = async () => {
+		if (!active || mailPolling || !workerActive() || !worker.identity) return;
+		mailPolling = true;
+		try {
+			const identity = worker.identity;
+			const handle = identity.workerHandle || env.ORCA_TERMINAL_HANDLE || "";
+			if (!handle) return;
+			const capture = await runOrcaCli(env.PI_BG_ORCA_BIN || "orca", ["orchestration", "check", "--terminal", handle, "--peek", "--json"], { cwd: ctxRef?.cwd ?? process.cwd(), env });
+			const doc = extractJson(capture.stdout) as { ok?: unknown; result?: unknown } | undefined;
+			if (!doc || doc.ok !== true || !active || worker.identity?.dispatchId !== identity.dispatchId) return;
+			const decision = decideMail(mail, parsePeek(doc.result, handle), now());
+			mail = decision.state;
+			if (!decision.announce.length) return;
+			const detached = detachAll();
+			pi.sendMessage(
+				{
+					customType: MAIL_MESSAGE,
+					content: formatMailNotice(decision.announce, identity, { reminder: decision.reminder, detached }),
+					display: true,
+					details: { dispatchId: identity.dispatchId, messages: decision.announce.map((m) => ({ id: m.id, type: m.type, subject: m.subject })), detached: detached.map((d) => d.id) },
+				},
+				{ deliverAs: "steer", triggerTurn: true },
+			);
+		} finally {
+			mailPolling = false;
+		}
+	};
+
 	// ---- lifecycle -------------------------------------------------------
 
 	pi.on("session_start", (_event, ctx) => {
@@ -291,6 +346,11 @@ export default function piBg(pi: ExtensionAPI) {
 			bridge.start();
 		}
 		if (ctx.hasUI && ctx.mode === "tui") installCard(ctx);
+		if (orcaEnabled) {
+			mail = initialMail();
+			mailTimer = setInterval(() => void pollMail(), MAIL_POLL_MS);
+			mailTimer.unref?.();
+		}
 		tickTimer = setInterval(() => cardTui?.requestRender(), 5_000);
 		tickTimer.unref?.();
 		const onExit = () => {
@@ -307,7 +367,9 @@ export default function piBg(pi: ExtensionAPI) {
 		active = false;
 		for (const timer of [noticeTimer, fleetTimer]) if (timer) clearTimeout(timer);
 		if (tickTimer) clearInterval(tickTimer);
-		noticeTimer = fleetTimer = tickTimer = undefined;
+		if (mailTimer) clearInterval(mailTimer);
+		noticeTimer = fleetTimer = tickTimer = mailTimer = undefined;
+		attachedCalls.clear();
 		noticeQueue = [];
 		fleetQueue = [];
 		fleet?.dispose();
@@ -403,7 +465,14 @@ export default function piBg(pi: ExtensionAPI) {
 	// ---- Orca worker side: preamble, lifecycle results, reminder -----------
 
 	pi.on("input", (event) => {
-		if (inOrcaTerminal && !gentleChild) worker = onInput(worker, event.text ?? "");
+		if (inOrcaTerminal && !gentleChild) {
+			const before = worker.identity?.dispatchId;
+			worker = onInput(worker, event.text ?? "");
+			if (worker.identity && worker.identity.dispatchId !== before) {
+				mail = initialMail();
+				setTimeout(() => void pollMail(), 2_000).unref?.();
+			}
+		}
 		return undefined;
 	});
 
@@ -423,15 +492,37 @@ export default function piBg(pi: ExtensionAPI) {
 
 	// ---- bash guard and lifecycle detection --------------------------------
 
-	pi.on("tool_call", (event) => {
+	pi.on("tool_call", async (event, ctx) => {
 		if (event.toolName !== "bash") return;
-		const command = String((event.input as { command?: unknown }).command ?? "");
-		if (!classifyOrcaCommand(command).includes("consuming-check")) return;
-		if (inOrcaTerminal && gentleChild) {
-			return { block: true, reason: "This is a subagent of an Orca coordinator: it shares the coordinator's terminal identity, so a consuming `orca orchestration check` would take the coordinator's mail. Report back to the parent instead; read-only `check --peek` / `--all` are allowed." };
+		const input = event.input as { command?: unknown };
+		const command = String(input.command ?? "");
+		if (classifyOrcaCommand(command).includes("consuming-check")) {
+			if (inOrcaTerminal && gentleChild) {
+				return { block: true, reason: "This is a subagent of an Orca coordinator: it shares the coordinator's terminal identity, so a consuming `orca orchestration check` would take the coordinator's mail. Report back to the parent instead; read-only `check --peek` / `--all` are allowed." };
+			}
+			if (bridgeOwnsMailbox()) return { block: true, reason: BLOCK_REASON };
+			return;
 		}
-		if (bridgeOwnsMailbox()) return { block: true, reason: BLOCK_REASON };
+		// A dispatched worker runs its commands as attached pi-bg tasks, so a
+		// coordinator message can move a blocking one to the background.
+		if (!workerActive() || !manager || env.PI_BG_ATTACH === "0" || !attachable(command)) return;
+		try {
+			const firstLine = command.split("\n")[0];
+			const snap = await manager.start({ command, cwd: ctx.cwd, label: `bash · ${firstLine.slice(0, 60)}`, attached: true });
+			attachedCalls.set(event.toolCallId, snap.id);
+			input.command = `# pi-bg ${snap.id} (moves to the background if your coordinator writes): ${firstLine.slice(0, 200)}\n${attachCommand(process.execPath, ATTACH_CLIENT, snap.logPath, snap.outputOffset, snap.id)}`;
+		} catch {
+			/* too many tasks or no log dir: run it the ordinary way */
+		}
 		return;
+	});
+
+	pi.on("tool_execution_end", (event) => {
+		const id = attachedCalls.get(event.toolCallId);
+		if (!id) return;
+		attachedCalls.delete(event.toolCallId);
+		// Still attached after the call ended: the bash tool timed out or was aborted.
+		if (manager?.get(id)?.attached) manager.cancel(id);
 	});
 
 	pi.on("tool_result", (event) => {
