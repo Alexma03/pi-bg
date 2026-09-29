@@ -125,7 +125,10 @@ export interface ActivitySeen {
 }
 
 /** Fold a new reading into the previous one; `since` moves only on a real change. */
-export function nextActivity(prev: ActivitySeen | undefined, text: string, now: number): ActivitySeen {
-	if (prev && activityKey(prev.text) === activityKey(text)) return { text, since: prev.since };
-	return { text, since: now };
+export function nextActivity(prev: ActivitySeen | undefined, text: string, now: number, activityAt?: number | null): ActivitySeen {
+	let since = prev && activityKey(prev.text) === activityKey(text) ? prev.since : now;
+	// Orca may report a recent heartbeat/status from this Dispatch even when
+	// its visible screen has not changed (common for long-running operators).
+	if (activityAt !== null && activityAt !== undefined && activityAt <= now && activityAt > since) since = activityAt;
+	return { text, since };
 }

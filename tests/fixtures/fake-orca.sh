@@ -17,6 +17,22 @@ if [[ "$1 $2" == "orchestration worker-list" ]]; then
 	cat "$dir/workers.json" 2>/dev/null || echo '{"ok":true,"result":{"workers":[],"page":{"hasMore":false,"nextCursor":null}}}'
 	exit 0
 fi
+if [[ "$1 $2" == "orchestration worker-read" ]]; then
+	cat "$dir/worker-read.json" 2>/dev/null || echo '{"ok":true,"result":{"terminal":{"tail":[]}}}'
+	exit 0
+fi
+if [[ "$1 $2" == "orchestration worker-show" ]]; then
+	cat "$dir/worker-show.json" 2>/dev/null || echo '{"ok":true,"result":{}}'
+	exit 0
+fi
+if [[ "$1 $2" == "orchestration worker-release" ]]; then
+	cat "$dir/worker-release.json" 2>/dev/null || echo '{"ok":true,"result":{"state":"released"}}'
+	exit 0
+fi
+if [[ "$1 $2" == "terminal close" ]]; then
+	cat "$dir/terminal-close.json" 2>/dev/null || echo '{"ok":true,"result":{"closed":true}}'
+	exit 0
+fi
 if [[ "$1 $2" == "orchestration task-list" ]]; then
 	cat "$dir/tasks.json" 2>/dev/null || echo '{"ok":true,"result":{"tasks":[]}}'
 	exit 0

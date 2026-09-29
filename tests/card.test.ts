@@ -87,7 +87,7 @@ test("background card shows only tasks, in Spanish; Orca never leaks into it", (
 	assert.ok(lines.every((l) => visibleWidth(l) === 60), lines.join("\n"));
 });
 
-test("orca card names the Run by objective and shows each agent: task, state, time, agent, model, live activity", () => {
+test("orca card shows the current label and each agent's provider/model, thinking, activity and task state", () => {
 	const runId = "run_8da5785a70be";
 	const orca = { ...initialState(), phase: "waiting" as const, runId };
 	const tasks = [
@@ -98,27 +98,34 @@ test("orca card names the Run by objective and shows each agent: task, state, ti
 	fleet = updateFleet(fleet, [worker("a", { activity: "done" }), worker("b")], undefined, 5 * 60_000).state;
 	const details = new Map([
 		["a", { agent: "pi", model: "", effort: "", startedAt: 0, reusedTerminal: false }],
-		["b", { agent: "codex", model: "gpt-6-sol", effort: "high", startedAt: 60_000, reusedTerminal: false }],
+		["b", { agent: "codex", model: "gpt-6-sol", provider: "openai-codex", effort: "high", startedAt: 60_000, reusedTerminal: false }],
 	]);
 	const activity = new Map([["a", { text: "$ pnpm test", since: 0 }], ["b", { text: "⏵ espera 3 min · 1m30s", since: 0 }]]);
-	const card = buildOrcaCard({ now: 5 * 60_000, orca, fleet, objective: "Lab visual", details, activity, defaultModel: (agent) => (agent === "pi" ? "claude-opus-5-5" : undefined) });
+	const card = buildOrcaCard({ now: 5 * 60_000, orca, fleet, label: "Lab visual", details, activity, defaultModel: (agent) => (agent === "pi" ? { provider: "openai-codex", model: "gpt-6-luna", thinking: "max" } : undefined) });
 	assert.ok(card);
 	assert.equal(card.title, "Orca · Lab visual · 2 agentes");
 	assert.equal(card.tone, "warning");
 	const text = card.rows.map((r) => r.text);
 	assert.deepEqual(text, [
-		"⏸ agente · Revisar docs · parado 5m00s sin terminar · 5m00s · pi · claude-opus-5-5 (por defecto)",
+		"⏸ agente · Revisar docs · parado 5m00s sin terminar · 5m00s · pi · openai-codex/gpt-6-luna · max (por defecto)",
 		"  ↳ $ pnpm test",
-		"◉ agente · Tests · trabajando · 4m00s · codex · gpt-6-sol high",
+		"◉ agente · Tests · trabajando · 4m00s · codex · openai-codex/gpt-6-sol · high",
 		"  ↳ ⏵ espera 3 min · 1m30s",
 	]);
 	assert.doesNotMatch(text.join("\n"), /Lee el README|Corre los tests/, "the launch prompt is not shown");
-	const reused = buildOrcaCard({ now: 5 * 60_000, orca, fleet, objective: "Lab visual", details: new Map([["a", { agent: "", model: "", effort: "", startedAt: 0, reusedTerminal: true }]]), activity, defaultModel: () => "claude-opus-5-5" });
+	const reused = buildOrcaCard({ now: 5 * 60_000, orca, fleet, label: "Lab visual", details: new Map([["a", { agent: "", model: "", effort: "", startedAt: 0, reusedTerminal: true }]]), activity, defaultModel: () => ({ provider: "anthropic", model: "claude-opus-5-5" }) });
 	assert.match(reused!.rows[0].text, / · pi$/, "no guessed default model for a worker dispatched into an existing terminal");
 	assert.equal(card.rows[1].tone, "muted");
 	assert.doesNotMatch(text.join("\n"), /run_8da5|delivery|listening/);
 	const lines = renderCardLines(card, plainTheme, 60);
 	assert.ok(lines.every((l) => visibleWidth(l) === 60), lines.join("\n"));
+});
+
+test("orca card derives a useful current task title instead of the stale Run creation objective", () => {
+	const orca = { ...initialState(), phase: "waiting" as const, runId: "run_old_objective" };
+	const fleet = updateFleet(initialFleet(), [worker("a", { taskId: "task_current" })], [{ id: "task_current", title: "Current release gate", spec: "", status: "dispatched", deps: [], parentId: null }], 0).state;
+	const card = buildOrcaCard({ now: 1000, orca, fleet });
+	assert.equal(card?.title, "Orca · Current release gate · 1 agente");
 });
 
 test("orca card hides with no agents unless the bridge needs attention", () => {
@@ -139,7 +146,7 @@ test("orca card stays while a settled agent still has to be released", () => {
 	const fleet = updateFleet(initialFleet(), [worker("a", { outcome: "succeeded", workerState: "succeeded", nextAction: "release" })], [], 0).state;
 	const card = buildOrcaCard({ now: 1000, orca, fleet });
 	assert.ok(card);
-	assert.equal(card.title, "Orca · run_x");
+	assert.equal(card.title, "Orca · task_a", "a useful current task title replaces the stale Run objective");
 	assert.match(card.rows[0].text, /✔ agente · task_a · terminó · falta cerrarlo/);
 });
 
@@ -181,7 +188,7 @@ test("a folded card is one line: its title plus a summary of what needs attentio
 	const orca = { ...initialState(), phase: "waiting" as const, runId: "run_r" };
 	let fleet = updateFleet(initialFleet(), [worker("a", { activity: "done" }), worker("b")], [], 0).state;
 	fleet = updateFleet(fleet, [worker("a", { activity: "done" }), worker("b")], undefined, 5 * 60_000).state;
-	const card = buildOrcaCard({ now: 5 * 60_000, orca, fleet, objective: "Lab" })!;
+	const card = buildOrcaCard({ now: 5 * 60_000, orca, fleet, label: "Lab" })!;
 	assert.equal(card.summary, "1 necesita atención");
 	assert.match(renderCardLines(foldCard(card), plainTheme, 80)[0], /Orca · Lab · 2 agentes · 1 necesita atención ▸/);
 });

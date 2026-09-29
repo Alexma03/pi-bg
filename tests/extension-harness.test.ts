@@ -106,6 +106,14 @@ async function fakeOrcaDir(run: string | null) {
 	return dir;
 }
 
+function fleetWorker(dispatchId: string, extra: Record<string, unknown> = {}) {
+	return {
+		dispatchId, taskId: `task_${dispatchId}`, runId: "run_fake", workerState: "ready", dispatchStatus: "dispatched", terminalState: "active", agentTerminalHandle: `term_${dispatchId}`,
+		resource: { ownershipState: "owned" }, projection: { stage: { activity: "working" }, outcome: "in_progress", liveness: { verdict: "live", observedAt: Date.now() }, attention: { categories: [], requiresAction: false }, nextAction: { kind: "none" } },
+		...extra,
+	};
+}
+
 test("outside Orca: bg tools only, and a finished task wakes the model with steer + triggerTurn", async () => {
 	const state = await mkdtemp(join(tmpdir(), "pi-bg-state-"));
 	await withEnv({ ORCA_TERMINAL_HANDLE: undefined, GENTLE_PI_AGENTS_CHILD: undefined, PI_BG_STATE_DIR: state }, async () => {
@@ -212,6 +220,7 @@ test("coordinator in Orca: tools activate with the Run, deliveries inject, guard
 		const f = fakePi();
 		piBg(f.pi as never);
 		assert.ok(f.tools.has("orca_ack") && f.tools.has("orca_workers") && f.tools.has("orca_watch"));
+		for (const name of ["orca_release", "orca_screen", "orca_label", "orca_watchdog"]) assert.ok(f.tools.has(name), `${name} should be available in the coordinator`);
 		await f.fire("session_start");
 		await until(() => f.sent.some((s) => s.message.customType === "pi-bg-orca"));
 		const delivery = f.sent.find((s) => s.message.customType === "pi-bg-orca")!;
@@ -433,6 +442,68 @@ test("worker attach: a bash call without a timeout gets 30 s, one with a timeout
 		assert.match(after, /bg2 timeout/);
 		const ctl = JSON.parse(await readFile(`${after.match(/log: (\S+)/)![1]}.ctl`, "utf8"));
 		assert.match(ctl.error, /stopped at its 1s deadline.*timeout/);
+		await f.fire("session_shutdown");
+	});
+});
+
+test("watchdog wakes the coordinator with the question and options from a Pi picker; orca_screen trims it", async () => {
+	const state = await mkdtemp(join(tmpdir(), "pi-bg-state-"));
+	const dir = await fakeOrcaDir("run_fake");
+	const picker = (await readFile(new URL("./fixtures/watchdog/pi-picker.txt", import.meta.url), "utf8")).trimEnd().split(/\r?\n/);
+	await writeFile(join(dir, "workers.json"), JSON.stringify({ ok: true, result: { workers: [fleetWorker("ctx_pick", {
+		projection: { stage: { activity: "blocked" }, outcome: "in_progress", liveness: { verdict: "live", observedAt: Date.now() }, attention: { categories: ["input"], requiresAction: true }, nextAction: { kind: "none" } },
+	})], page: { hasMore: false, nextCursor: null } } }));
+	await writeFile(join(dir, "tasks.json"), JSON.stringify({ ok: true, result: { tasks: [{ id: "task_ctx_pick", display_name: "Pick test scope", spec: "", status: "dispatched", deps: "[]" }] } }));
+	await writeFile(join(dir, "worker-read.json"), JSON.stringify({ ok: true, result: { terminal: { tail: picker } } }));
+	await withEnv({ ORCA_TERMINAL_HANDLE: "term_coord", GENTLE_PI_AGENTS_CHILD: undefined, PI_BG_STATE_DIR: state, PI_BG_ORCA_BIN: FAKE, FAKE_ORCA_DIR: dir }, async () => {
+		const f = fakePi();
+		piBg(f.pi as never);
+		await f.fire("session_start");
+		await until(() => readFileSync(join(dir, "calls.log"), "utf8").includes("worker-list"));
+		await f.tools.get("orca_workers")!.execute("w", { refresh: true }, undefined, undefined, f.ctx);
+		await until(() => f.sent.some((x) => x.message.customType === "pi-bg-fleet"), 8_000);
+		const notice = f.sent.find((x) => x.message.customType === "pi-bg-fleet")!.message.content;
+		assert.match(notice, /WAITING FOR ANSWER/);
+		assert.match(notice, /Which test scope should I run\?/);
+		assert.match(notice, /Unit tests, Unit plus integration tests, Skip tests/);
+		const screen = await f.tools.get("orca_screen")!.execute("s", { dispatchId: "ctx_pick", lines: 20 }, undefined, undefined, f.ctx);
+		assert.match(screen.content[0].text ?? "", /Which test scope should I run\?/);
+		assert.match(screen.content[0].text ?? "", /Unit plus integration tests/);
+		assert.doesNotMatch(screen.content[0].text ?? "", /Working|700k|orca ◉/);
+		await f.fire("session_shutdown");
+	});
+});
+
+test("orca_release uses native release then closes only a freshly exited terminal; label and watchdog config persist", async () => {
+	const state = await mkdtemp(join(tmpdir(), "pi-bg-state-"));
+	const dir = await fakeOrcaDir("run_fake");
+	await writeFile(join(dir, "workers.json"), JSON.stringify({ ok: true, result: { workers: [fleetWorker("ctx_release", {
+		workerState: "succeeded", dispatchStatus: "completed", terminalState: "release_unknown",
+		projection: { stage: { activity: "done" }, outcome: "succeeded", liveness: { verdict: "exited", reason: "process_exited", observedAt: Date.now() }, attention: { categories: [], requiresAction: false }, nextAction: { kind: "release" } },
+	})], page: { hasMore: false, nextCursor: null } } }));
+	await writeFile(join(dir, "worker-release.json"), JSON.stringify({ ok: false, error: { code: "release_unknown", message: "stale resource record" } }));
+	await withEnv({ ORCA_TERMINAL_HANDLE: "term_coord", GENTLE_PI_AGENTS_CHILD: undefined, PI_BG_STATE_DIR: state, PI_BG_ORCA_BIN: FAKE, FAKE_ORCA_DIR: dir }, async () => {
+		const f = fakePi();
+		piBg(f.pi as never);
+		await f.fire("session_start");
+		await until(() => readFileSync(join(dir, "calls.log"), "utf8").includes("worker-list"));
+		await f.tools.get("orca_workers")!.execute("w", { refresh: true }, undefined, undefined, f.ctx);
+		assert.doesNotMatch(readFileSync(join(dir, "calls.log"), "utf8"), /worker-release|terminal close/, "cleanup is never automatic");
+		const released = await f.tools.get("orca_release")!.execute("r", { dispatchId: "ctx_release" }, undefined, undefined, f.ctx);
+		assert.match(released.content[0].text ?? "", /ctx_release: closed/);
+		const calls = readFileSync(join(dir, "calls.log"), "utf8");
+		assert.match(calls, /orchestration worker-release --dispatch ctx_release --json/);
+		assert.match(calls, /terminal close --terminal term_ctx_release --json/);
+		const fleet = await f.tools.get("orca_workers")!.execute("w", { refresh: true }, undefined, undefined, f.ctx);
+		assert.doesNotMatch(fleet.content[0].text ?? "", /to release/);
+		await f.tools.get("orca_label")!.execute("l", { label: "Current run focus" }, undefined, undefined, f.ctx);
+		await f.tools.get("orca_watchdog")!.execute("d", { enabled: false, cadenceMinutes: 3, scopeGlobs: ["src/**"] }, undefined, undefined, f.ctx);
+		const saved = JSON.parse(await readFile(join(state, "orca", "watchdog.json"), "utf8"));
+		assert.equal(saved.label, "Current run focus");
+		assert.equal(saved.config.enabled, false);
+		assert.equal(saved.config.cadenceMs, 3 * 60_000);
+		assert.deepEqual(saved.config.scopeGlobs, ["src/**"]);
+		assert.deepEqual(saved.resolvedRelease, ["ctx_release"]);
 		await f.fire("session_shutdown");
 	});
 });

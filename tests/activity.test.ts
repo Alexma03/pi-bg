@@ -79,12 +79,14 @@ test("falls back to the last line the agent wrote; nothing for pure chrome", () 
 	assert.equal(lastActivity([]), undefined);
 });
 
-test("ticking clocks are not a change; a new command is", () => {
+test("ticking clocks are not a change; a new command or dispatch status is activity", () => {
 	assert.equal(activityKey("⏵ bg1 build · 1m30s"), activityKey("⏵ bg1 build · 2m05s"));
 	const a = nextActivity(undefined, "$ pnpm test · 3s", 1000);
 	const b = nextActivity(a, "$ pnpm test · 40s", 9000);
 	assert.equal(b.since, 1000);
 	assert.equal(nextActivity(b, "read README.md", 12_000).since, 12_000);
+	const status = nextActivity(b, "$ pnpm test · 50s", 60_000, 55_000);
+	assert.equal(status.since, 55_000, "a recent heartbeat/status resets the no-change clock even when the screen line is identical");
 });
 
 const row = (id: string, extra: Partial<WorkerRow> = {}): WorkerRow => ({
@@ -113,8 +115,8 @@ test("orca_workers table shows agent, model and what each worker does now", () =
 	const state = updateFleet(initialFleet(), [row("a")], [{ id: "task_a", title: "Tests", spec: "", status: "dispatched", deps: [], parentId: null }], 0).state;
 	const text = formatWorkersTable(state, "run_r", 5 * 60_000, {
 		activity: new Map([["a", { text: "$ pnpm test", since: 60_000 }]]),
-		details: new Map([["a", { agent: "codex", model: "gpt-6-sol", effort: "", startedAt: 0, reusedTerminal: false }]]),
+		details: new Map([["a", { agent: "codex", model: "gpt-6-sol", provider: "openai-codex", effort: "max", startedAt: 0, reusedTerminal: false }]]),
 	});
-	assert.match(text, /- Tests · a · in_progress · working 5m00s · codex gpt-6-sol · started 5m00s ago/);
+	assert.match(text, /- Tests · a · in_progress · working 5m00s · codex openai-codex\/gpt-6-sol · max · started 5m00s ago/);
 	assert.match(text, /\n {4}now: \$ pnpm test \(unchanged 4m00s\)/);
 });

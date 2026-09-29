@@ -2,6 +2,7 @@
 
 import { clip, formatDuration, sanitizeTerminal } from "../text.ts";
 import { redact } from "../redact.ts";
+import { formatModel, resolveWorkerModel } from "./model.ts";
 import type { ActivitySeen } from "./activity.ts";
 import { isInProgress, summarize, summaryLine, type FleetEvent, type FleetState, type WorkerDetail } from "./fleet.ts";
 
@@ -9,6 +10,11 @@ const clean = (text: string): string => redact(sanitizeTerminal(text));
 
 const GUIDANCE: Record<string, string> = {
 	quiet: "It still reports working, but its activity (same command or line) has not changed for a while. Read it (orca orchestration worker-read --dispatch <id>): a long build or test may be fine; if it looks stuck, send it a follow-up (orca orchestration send --to dispatch:<id> ...). A Pi worker with pi-bg moves a blocking command to the background when your message arrives, so it can read it.",
+	scope: "The worker changed files outside the allowed edit surfaces. Inspect the exact paths and coordinate corrections; pi-bg never writes to the worker's repository.",
+	stall: "The worker says it is working, but its screen has not changed for the configured interval. Read it and check its latest heartbeat/status before deciding whether to follow up.",
+	loop: "Repeated waiting phrases were detected without visible progress. Read the worker screen and verify the awaited operation before steering it.",
+	prompt: "The worker is waiting for an answer. The question and visible options are included below; answer or select an option in that worker's terminal when appropriate.",
+	finished: "The worker finished or exited but its terminal is not closed. Use orca_release after confirming the settled outcome.",
 	stalled: "It ended its turn without worker_done. Inspect it (orca orchestration worker-read --dispatch <id>) and decide: send it a follow-up (orca orchestration send --to dispatch:<id> ...), or stop/abandon only with positive proof it exited.",
 	blocked: "Its terminal waits on an interactive prompt (for example a guarded git push). Read it with worker-read and decide whether you or the user should answer.",
 	exited: "Its process exited without worker_done. Follow its nextAction (worker-read / recovery) before retrying.",
@@ -29,6 +35,11 @@ const LABEL: Record<string, string> = {
 	ready_tasks: "ready tasks",
 	fleet_idle: "FLEET IDLE",
 	resumed: "update",
+	scope: "SCOPE",
+	stall: "SCREEN STALL",
+	loop: "LOOP",
+	prompt: "WAITING FOR ANSWER",
+	finished: "FINISHED · NOT CLOSED",
 };
 
 export function fleetEventLine(e: FleetEvent): string {
@@ -40,10 +51,15 @@ export function fleetEventLine(e: FleetEvent): string {
 }
 
 /** Only these kinds wake the model; the rest ride along or go to the card. */
-export const WAKE_KINDS = new Set(["stalled", "quiet", "blocked", "exited", "attention", "release", "fleet_idle", "ready_tasks"]);
+export const WAKE_KINDS = new Set(["stalled", "quiet", "blocked", "exited", "attention", "release", "fleet_idle", "ready_tasks", "scope", "stall", "loop", "prompt", "finished"]);
 
 export function shouldWake(events: FleetEvent[]): boolean {
 	return events.some((e) => WAKE_KINDS.has(e.kind) || (e.notes?.length ?? 0) > 0);
+}
+
+/** New watchdog findings bypass the ordinary fleet notice wake budget. */
+export function mustWake(events: FleetEvent[]): boolean {
+	return events.some((event) => ["scope", "stall", "loop", "prompt", "finished"].includes(event.kind));
 }
 
 export function formatFleetNotice(events: FleetEvent[], state: FleetState, runId: string, now: number): string {
@@ -77,7 +93,13 @@ export function formatWorkersTable(state: FleetState, runId: string, now: number
 		const activity = r.liveness === "live" ? `${r.activity} ${formatDuration(now - t.activitySince)}` : `${r.liveness}${r.livenessReason ? `/${r.livenessReason}` : ""}`;
 		const attention = r.attention.filter((c) => c !== "root_completion");
 		const detail = options.details?.get(r.dispatchId);
-		const who = detail?.agent ? ` · ${detail.agent}${detail.model ? ` ${detail.model}` : ""}` : "";
+		const model = resolveWorkerModel({
+			launch: detail?.model ? { provider: detail.provider, model: detail.model, thinking: detail.effort || undefined } : undefined,
+			status: detail?.statusModel,
+			reusedTerminal: detail?.reusedTerminal,
+		});
+		const modelText = formatModel(model);
+		const who = detail?.agent ? ` · ${detail.agent}${modelText ? ` ${modelText}` : ""}` : "";
 		const elapsed = detail?.startedAt != null ? ` · started ${formatDuration(Math.max(0, now - detail.startedAt))} ago` : "";
 		lines.push(
 			`- ${clip(clean(title), 50)} · ${r.dispatchId} · ${r.outcome} · ${activity}${who}${elapsed}${r.ownership === "user_owned" ? " · human-driven" : ""}${attention.length ? ` · attention ${attention.join(",")}` : ""}${r.nextAction !== "none" ? ` · next: ${r.nextAction}` : ""}`,

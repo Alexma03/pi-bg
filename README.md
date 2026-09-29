@@ -48,7 +48,7 @@ Restart or `/reload` running sessions to pick it up.
 
 The bridge is active only in an interactive Pi session inside an Orca terminal (`ORCA_TERMINAL_HANDLE` is set), and never in gentle subagent children. It works as follows.
 
-The coordinator tools (`orca_ack`, `orca_inbox`, `orca_workers`, `orca_watch`) are active in such a session from the start, even before a Run is bound. Some providers, such as claude-bridge, fix the tool list for a whole turn. Without this, a delivery that arrives in the same turn as `run-create` could not be acknowledged until the next turn. Without a Run the tools only answer that nothing is bound.
+The coordinator tools (`orca_ack`, `orca_inbox`, `orca_workers`, `orca_watch`, `orca_release`, `orca_screen`, `orca_label`, `orca_watchdog`) are active in such a session from the start, even before a Run is bound. Some providers, such as claude-bridge, fix the tool list for a whole turn. Without this, a delivery that arrives in the same turn as `run-create` could not be acknowledged until the next turn. Without a Run the tools only answer that nothing is bound.
 
 1. **Detect.** At session start, and again after any bash `orca orchestration run-create|run-use`, the bridge runs `orca orchestration run-current`. While no Run is bound it re-checks every 2 minutes.
 2. **Wait.** It keeps exactly one `orca orchestration check --wait --json` child, **without `--types`**. Orca 1.4.212 does not type its "You have N orchestration messages" pointer while an unfiltered waiter exists, or while a delivery is outstanding. Both states are covered, so the pointer never appears.
@@ -79,12 +79,16 @@ The coordinator tools (`orca_ack`, `orca_inbox`, `orca_workers`, `orca_watch`) a
 
 The footer shows `⏵ 2 tareas` for tasks and a separate Orca segment. The Orca segment reads `orca ◉ escuchando` while waiting, `orca ◆ sin procesar 2m05s` while a delivery is pending, and `orca ⚠ reintento 30s` during backoff.
 
-### Fleet watch (coordinator)
+### Fleet watch and native watchdog (coordinator)
 
-While a Run is bound, pi-bg polls `worker-list --run` and `task-list --run` every 30 s. These calls are read-only, use explicit paging, and never touch the mailbox. pi-bg then sends an **Orca fleet** message on these transitions:
+While a Run is bound, pi-bg polls `worker-list --run` and `task-list --run` every 30 s. These calls are read-only, use explicit paging, and never touch the mailbox. Terminal snapshots and the native watchdog run every 2 minutes by default (configurable); they make no model calls. The watchdog checks Git changes since `merge-base origin/main` against the Task's `Allowed edit surfaces` section (or configured `scopeGlobs`), unchanged working screens, repeated waiting loops, local approval/picker prompts, Orca asks and idle plain-text questions, and finished workers awaiting release. Git includes committed, staged, unstaged and untracked paths. The watchdog never writes to worker repos or acts on findings.
+
+Only new findings wake the coordinator; watchdog findings bypass the ordinary fleet wake budget, active findings are deduplicated, and cleared/reopened findings have a cooldown. Its configuration and detector state live under `PI_BG_STATE_DIR/orca/watchdog.json`. Recent heartbeat/status timestamps count as activity even when a long-running worker's screen is unchanged. Notices contain question text and visible options where available, so the coordinator can decide how to answer.
+
+pi-bg also sends an **Orca fleet** message on these existing transitions:
 
 - **stalled**: the worker is in progress but its activity has been `done` or `idle` for 3 min, or its status is stale, and it has not sent `worker_done`;
-- **no change**: the worker reports working, but what it is doing (read every 10 s from its terminal, running clocks ignored) has not changed for 10 min. Waiting on its own background task does not count;
+- **no change**: the worker reports working, but its normalized terminal activity has not changed for 10 min. Running clocks/spinners are ignored, and recent dispatch heartbeat/status messages reset the clock; waiting on its own background task does not count;
 - **blocked**: an interactive prompt has been open in its terminal for more than 1 min;
 - **exited**: the process exited without `worker_done`;
 - **attention**: Orca reports input, approval, failure or interruption;
@@ -96,6 +100,12 @@ Notices are coalesced over 5 s. At most 4 notices per 10 min start a turn; the r
 
 - `orca_workers {all?, refresh?}` shows the fleet table: outcome, activity, agent and model, time since dispatch, and a `now:` line with what each open worker is doing and how long that has been unchanged.
 - `orca_watch {dispatchId, on?, note?}` adds events (`settled`, `any`) plus a note that comes back verbatim in the notice. Notes survive `/reload`.
+- `orca_watchdog {enabled?, cadenceMinutes?, stallMinutes?, loopMinutes?, waitRepeatCount?, cooldownMinutes?, releaseGraceMinutes?, scopeGlobs?}` configures or disables model-free checks. `scopeGlobs: []` uses the Task spec's allowed surfaces.
+- `orca_screen {dispatchId, lines?}` reads a bounded screen tail with spinner/footer noise removed; picker questions and options remain visible.
+- `orca_release {dispatchId}` releases one explicitly selected settled worker; `orca_release {all:true}` handles all reclaimable settled workers. It uses Orca's native release first and closes an exact terminal only after fresh positive `exited` evidence.
+- `orca_label {label}` sets a short current-focus Run-card label that survives reload; without one, the card uses current worker Task titles rather than the stale Run-creation objective.
+
+Model display uses explicit launch model/thinking options, then the worker's visible Pi status bar, then the Pi project/personal profile default (marked `(por defecto)`). It never copies the coordinator's current model.
 
 While a `bg_run` task runs, pi-bg emits `subagent:async-started` and `subagent:async-complete` on `pi.events`. Orca's Pi status extension then keeps the pane "working". A worker waiting on a gate is therefore not mistaken for a stalled one, and the Orca UI shows it as busy.
 
@@ -128,10 +138,10 @@ A dispatched worker loses the coordinator tools as soon as its preamble arrives,
   - **"⏵ Segundo plano"** lists background work only: `bg_run` tasks, plus a worker's bash command once it has moved to the background. A command the agent is still waiting on does not appear, and neither does an internal `bgN` id. The time comes first, so a long command never hides it:
     - `⏵ 3m21s de 30m00s · infra verify.sh · ok 12/40`: running for 3m21s of its 30-minute deadline, then its label or command (clipped) and its last output line;
     - `✔ terminó bien · 20s · prueba idle`: finished ones lead with a plain outcome ("terminó bien", "falló (código 7)", "encontró el patrón", "tiempo agotado"…).
-  - **"⇄ Orca · <objective>"** names the Run by its objective and shows one entry per open agent.
-    - First line: `agente ·`, the task title, its state ("trabajando", "esperando", "parado 5m sin terminar", "esperando una respuesta en su terminal", "terminó · falta cerrarlo"), the time since dispatch, the agent and the model. When no `--model` was passed, a Pi worker shows the `defaultModel` from its project settings, falling back to the personal ones, marked "(por defecto)". No model is guessed for a worker dispatched into an existing terminal (`--terminal`).
-    - Second line, dimmed (`↳`): what the worker is doing now, refreshed every 10 s from the tail of its terminal (`worker-read`, sanitized and redacted). It shows a background task it is waiting on, else its last tool action (`$ command`, `read file`, `bg_run · …`), else the last line it wrote. A tool call whose arguments are still being written (`write ...`, `$ ...`) is described in words, followed by what the agent said just before: `escribiendo un fichero · Writing the report now.`
-    - Agent, model and start time come from one `worker-show` per dispatch; the objective comes from `run-show`. All these reads are read-only; the first two are cached.
+  - **"⇄ Orca · <current focus>"** uses a short `orca_label` override or current worker Task titles (not the stale Run creation objective) and shows one entry per open agent.
+    - First line: `agente ·`, the task title, its state ("trabajando", "esperando", "parado 5m sin terminar", "esperando una respuesta en su terminal", "terminó · falta cerrarlo"), the time since dispatch, the agent and provider/model plus thinking level. Evidence order is explicit launch options, the worker's visible Pi status bar, then project/personal profile default (marked "(por defecto)"). A reused terminal gets no guessed profile default.
+    - Second line, dimmed (`↳`): what the worker is doing now, refreshed every 2 min from the tail of its terminal (`worker-read`, sanitized and redacted). It shows a background task it is waiting on, else its last tool action (`$ command`, `read file`, `bg_run · …`), else the last line it wrote. A tool call whose arguments are still being written (`write ...`, `$ ...`) is described in words, followed by what the agent said just before: `escribiendo un fichero · Writing the report now.`
+    - Agent, launch model and start time come from `worker-show`; visible model/thinking is parsed from the worker's terminal status bar. These reads are read-only; launch details are cached.
     - The card is hidden while the session orchestrates no agent and the bridge is just listening.
     - A bridge row appears only when something needs attention: unprocessed messages, a retry, or a lost Run.
   - **A click on a card folds it** to a single line: its title plus what needs attention, e.g. `╶─ ⏵ Segundo plano · 2 en marcha · 1 falló ▸ ──╴` or `⇄ Orca · Funds DB · 11 agentes · 2 necesitan atención ▸`. Another click unfolds it. Each card folds on its own. Clicks need Pi's fullscreen mode (`tuiMode: fullscreen`), which captures the mouse; `/bg card fold` folds or unfolds both cards from the keyboard.
@@ -151,7 +161,7 @@ A dispatched worker loses the coordinator tools as soon as its preamble arrives,
 | `PI_BG_WORKER_MAIL=0` | Workers do not watch their mailbox for coordinator mail. |
 | `PI_BG_ATTACH=0` | Bash commands run the ordinary way (no automatic background, no detaching on coordinator mail). |
 | `PI_BG_AUTO_BACKGROUND_S` | Seconds after which a running bash command moves to the background (default 10; `0` = never). |
-| `PI_BG_STATE_DIR` | State root (default `$XDG_STATE_HOME/pi-bg` or `~/.local/state/pi-bg`). |
+| `PI_BG_STATE_DIR` | State root for tasks, Orca deliveries and watchdog configuration/findings (default `$XDG_STATE_HOME/pi-bg` or `~/.local/state/pi-bg`). |
 
 ## Development
 

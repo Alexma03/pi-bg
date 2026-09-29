@@ -21,7 +21,11 @@ import { Type } from "typebox";
 import { OrcaBridge, pruneOld } from "../lib/orca/bridge.ts";
 import { formatDelivery, heartbeatCount, typeSummary, type Delivery } from "../lib/orca/delivery.ts";
 import { FleetWatch } from "../lib/orca/fleet-driver.ts";
-import { formatFleetNotice, formatWorkersTable, shouldWake } from "../lib/orca/fleet-format.ts";
+import { profileModel, type ModelParts, type PiProfileSettings } from "../lib/orca/model.ts";
+import { releaseOne, releaseSelection } from "../lib/orca/release.ts";
+import { trimWorkerScreen } from "../lib/orca/screen.ts";
+import type { WatchdogConfig } from "../lib/orca/watchdog.ts";
+import { formatFleetNotice, formatWorkersTable, mustWake, shouldWake } from "../lib/orca/fleet-format.ts";
 import type { FleetEvent, FleetState, WatchOn } from "../lib/orca/fleet.ts";
 import { BLOCK_REASON, classifyOrcaCommand } from "../lib/orca/guard.ts";
 import { extractJson } from "../lib/orca/cli.ts";
@@ -47,6 +51,7 @@ const MAIL_POLL_MS = 15_000;
 const ATTACH_CLIENT = fileURLToPath(new URL("../lib/tasks/attach-client.mjs", import.meta.url));
 const WATCH_ENTRY = "pi-bg-watch";
 const FLEET_SEEN_ENTRY = "pi-bg-fleet-seen";
+const RELEASE_RESOLVED_ENTRY = "pi-bg-release-resolved";
 const STATUS_KEY = "pi-bg";
 const ORCA_STATUS_KEY = "pi-bg-orca";
 const CARD_KEY = "pi-bg-card";
@@ -58,7 +63,7 @@ const MAX_TIMEOUT_S = 24 * 3600;
 const ATTACH_DEFAULT_TIMEOUT_S = 30;
 /** A bash command still running after this moves to the background by itself. */
 const AUTO_BACKGROUND_S = 10;
-const ORCA_TOOLS = ["orca_ack", "orca_inbox", "orca_workers", "orca_watch"];
+const ORCA_TOOLS = ["orca_ack", "orca_inbox", "orca_workers", "orca_watch", "orca_release", "orca_screen", "orca_label", "orca_watchdog"];
 /** The prompt pi-bg sends to wake an idle session; not new direction from the user. */
 const WAKE_PREFIX = "⟳ pi-bg: ";
 
@@ -68,11 +73,12 @@ function stateDir(env: NodeJS.ProcessEnv): string {
 }
 
 /** The model a Pi worker starts with when no `--model` is given: project settings, then personal. */
-function piDefaultModel(cwd: string): string | undefined {
+function piDefaultModel(cwd: string): ModelParts | undefined {
 	for (const file of [join(cwd, ".pi", "settings.json"), join(homedir(), ".pi", "agent", "settings.json")]) {
 		try {
-			const settings = JSON.parse(readFileSync(file, "utf8")) as { defaultModel?: unknown };
-			if (typeof settings.defaultModel === "string" && settings.defaultModel) return settings.defaultModel;
+			const settings = JSON.parse(readFileSync(file, "utf8")) as PiProfileSettings;
+			const model = profileModel(settings);
+			if (model) return model;
 		} catch {
 			/* missing or unreadable */
 		}
@@ -285,9 +291,12 @@ export default function piBg(pi: ExtensionAPI) {
 		const wantsWake = shouldWake(events);
 		let trigger = false;
 		if (wantsWake) {
-			const taken = takeWake(wakeBudget, now());
-			wakeBudget = taken.budget;
-			trigger = taken.allowed;
+			if (mustWake(events)) trigger = true;
+			else {
+				const taken = takeWake(wakeBudget, now());
+				wakeBudget = taken.budget;
+				trigger = taken.allowed;
+			}
 		}
 		// A notice that waits for the next turn would carry a stale snapshot.
 		const state = trigger ? liveState() : "";
@@ -381,7 +390,7 @@ export default function piBg(pi: ExtensionAPI) {
 		});
 		void pruneOldLogs(join(root, "logs"));
 		if (orcaEnabled && ctx.mode === "tui") {
-			fleet = new FleetWatch({ orcaBin: env.PI_BG_ORCA_BIN || "orca", cwd: ctx.cwd, env, now, onEvents: queueFleet, onChange: refresh });
+			fleet = new FleetWatch({ orcaBin: env.PI_BG_ORCA_BIN || "orca", cwd: ctx.cwd, env, now, watchdogPath: join(root, "orca", "watchdog.json"), onEvents: queueFleet, onChange: refresh });
 			restoreWatches(ctx);
 			bridge = new OrcaBridge({
 				orcaBin: env.PI_BG_ORCA_BIN || "orca",
@@ -458,6 +467,16 @@ export default function piBg(pi: ExtensionAPI) {
 			/* older sessions */
 		}
 		try {
+			const released = (ctx.sessionManager.getBranch() as Array<{ type?: string; customType?: string; data?: unknown }>)
+				.filter((entry) => entry.type === "custom" && entry.customType === RELEASE_RESOLVED_ENTRY)
+				.map((entry) => entry.data as { dispatchId?: unknown } | undefined)
+				.map((data) => data?.dispatchId)
+				.filter((id): id is string => typeof id === "string");
+			fleet?.seedReleased(released);
+		} catch {
+			/* older sessions */
+		}
+		try {
 			for (const entry of ctx.sessionManager.getBranch() as Array<{ type?: string; customType?: string; data?: unknown }>) {
 				if (entry.type !== "custom" || entry.customType !== WATCH_ENTRY) continue;
 				const w = entry.data as { dispatchId?: unknown; on?: unknown; note?: unknown; createdAt?: unknown } | undefined;
@@ -517,7 +536,7 @@ export default function piBg(pi: ExtensionAPI) {
 				orca: bridge?.state,
 				fleet: fleet?.state,
 				fleetIncomplete: fleet?.incomplete,
-				objective: fleet?.objective,
+				label: fleet?.label || undefined,
 				details: fleet?.details,
 				activity: fleet?.activity,
 				defaultModel: (agent) => (agent === "pi" ? piModel : undefined),
@@ -841,7 +860,7 @@ export default function piBg(pi: ExtensionAPI) {
 			name: "orca_watch",
 			label: "Orca watch",
 			description:
-				"Ask to be notified about one worker, with a note to yourself that comes back verbatim in the notice (e.g. 'when A0 settles, launch the A1 review'). Every worker of the Run is already watched for stalls, prompts, exits and attention; this adds events (settled, any activity change) and the note. The note survives /reload.",
+				"Ask to be notified about one worker, with a note to yourself that comes back verbatim in the notice (e.g. 'when A0 settles, launch the A1 review'). Every worker of the Run is already watched for stalls, loops, prompts, scope violations, exits and attention; this adds events (settled, any activity change) and the note. The note survives /reload.",
 			parameters: Type.Object(
 				{
 					dispatchId: Type.String({ description: "Dispatch id (ctx_...) of the worker." }),
@@ -857,6 +876,111 @@ export default function piBg(pi: ExtensionAPI) {
 				fleet.addWatch(watch);
 				pi.appendEntry(WATCH_ENTRY, watch);
 				return { content: [{ type: "text", text: `Watching ${params.dispatchId} for ${watch.on.join(", ")}${watch.note ? ` with note: ${watch.note}` : ""}.` }], details: undefined };
+			},
+		});
+
+		pi.registerTool({
+			name: "orca_release",
+			label: "Orca release",
+			description: "Explicitly release one settled worker by dispatchId, or all reclaimable settled workers with all=true. Uses Orca worker-release first; only after a fresh positive exited verdict may it close that exact terminal as a fallback. It never releases a live, unsettled, user-owned or unverifiable worker.",
+			promptSnippet: "orca_release: explicitly clean up settled workers; one dispatchId or all=true, never infer release intent.",
+			parameters: Type.Object({ dispatchId: Type.Optional(Type.String()), all: Type.Optional(Type.Boolean()) }, { additionalProperties: false }),
+			renderResult: compactResult,
+			async execute(_id, params, _signal, _onUpdate, ctx) {
+				ctxRef = ctx;
+				if (!fleet || !fleet.runId) throw new Error("No Run is bound, so there are no workers to release.");
+				await fleet.poll();
+				const candidates = releaseSelection([...fleet.state.workers.values()].map((t) => t.row), { dispatchId: params.dispatchId, all: params.all });
+				if (!candidates.length) return { content: [{ type: "text", text: "No settled workers are reclaimable." }], details: undefined };
+				const results = [];
+				for (const row of candidates) {
+					const outcome = await releaseOne(row, {
+						run: async (args) => {
+							const capture = await runOrcaCli(env.PI_BG_ORCA_BIN || "orca", args, { cwd: ctx.cwd, env });
+							return { doc: extractJson(capture.stdout), exitCode: capture.exitCode };
+						},
+						refresh: async (dispatchId) => {
+							await fleet!.poll();
+							return fleet!.worker(dispatchId);
+						},
+						resolved: (dispatchId) => {
+							fleet!.markReleased(dispatchId);
+							pi.appendEntry(RELEASE_RESOLVED_ENTRY, { runId: fleet!.runId, dispatchId });
+						},
+					});
+					results.push(outcome);
+				}
+				await fleet.persist();
+				await fleet.poll();
+				refresh();
+				return { content: [{ type: "text", text: results.map((r) => `${r.dispatchId}: ${r.status} · ${r.detail}`).join("\n") }], details: { results } };
+			},
+		});
+
+		pi.registerTool({
+			name: "orca_screen",
+			label: "Orca screen",
+			description: "Read a bounded, trimmed tail of one worker's terminal with spinner/footer noise removed. Read-only; preserves interactive questions and visible options.",
+			parameters: Type.Object({ dispatchId: Type.String(), lines: Type.Optional(Type.Integer({ minimum: 5, maximum: 80 })) }, { additionalProperties: false }),
+			renderResult: compactResult,
+			async execute(_id, params, _signal, _onUpdate, ctx) {
+				if (!fleet || !fleet.runId) throw new Error("No Run is bound.");
+				const worker = fleet.worker(params.dispatchId);
+				if (!worker) throw new Error(`Dispatch ${params.dispatchId} is not in the bound Run.`);
+				const limit = params.lines ?? 30;
+				const capture = await runOrcaCli(env.PI_BG_ORCA_BIN || "orca", ["orchestration", "worker-read", "--dispatch", params.dispatchId, "--source", "terminal", "--limit", String(limit), "--json"], { cwd: ctx.cwd, env });
+				const doc = extractJson(capture.stdout) as { ok?: unknown; result?: unknown } | undefined;
+				const result = doc?.ok === true && doc.result && typeof doc.result === "object" ? (doc.result as Record<string, unknown>) : undefined;
+				const terminal = result?.terminal && typeof result.terminal === "object" ? (result.terminal as Record<string, unknown>) : undefined;
+				const tail = Array.isArray(terminal?.tail) ? terminal.tail.filter((line): line is string => typeof line === "string") : [];
+				const screen = trimWorkerScreen(tail, limit).map(clean).join("\n");
+				return { content: [{ type: "text", text: `Worker ${params.dispatchId} · ${worker.activity}${screen ? `\n${screen}` : "\n(no terminal output)"}` }], details: { dispatchId: params.dispatchId, lines: limit } };
+			},
+		});
+
+		pi.registerTool({
+			name: "orca_label",
+			label: "Orca label",
+			description: "Set a short coordinator-owned label for the bound Run header; it survives reload. Empty string clears it. The original Run objective is not used as a live status label.",
+			parameters: Type.Object({ label: Type.String({ maxLength: 80, description: "Short current focus, up to 80 characters; empty clears." }) }, { additionalProperties: false }),
+			renderResult: compactResult,
+			async execute(_id, params) {
+				if (!fleet || !fleet.runId) throw new Error("No Run is bound.");
+				const label = await fleet.setLabel(params.label);
+				refresh();
+				return { content: [{ type: "text", text: label ? `Run card label set to: ${label}` : "Run card label cleared; showing current worker task titles instead." }], details: { label } };
+			},
+		});
+
+		pi.registerTool({
+			name: "orca_watchdog",
+			label: "Orca watchdog",
+			description: "Configure the native model-free worker watchdog. Defaults: 2-minute scans, 10-minute unchanged-screen stall, 6-minute waiting-loop detection, 30-minute finding cooldown. Scope globs override each Task spec's Allowed edit surfaces; [] uses the spec. Disable with enabled=false. It reports new findings only and never writes to worker repos or steers/releases workers.",
+			parameters: Type.Object({
+				enabled: Type.Optional(Type.Boolean()),
+				cadenceMinutes: Type.Optional(Type.Integer({ minimum: 1, maximum: 30 })),
+				stallMinutes: Type.Optional(Type.Integer({ minimum: 1, maximum: 360 })),
+				loopMinutes: Type.Optional(Type.Integer({ minimum: 1, maximum: 360 })),
+				waitRepeatCount: Type.Optional(Type.Integer({ minimum: 2, maximum: 10 })),
+				cooldownMinutes: Type.Optional(Type.Integer({ minimum: 1, maximum: 1440 })),
+				releaseGraceMinutes: Type.Optional(Type.Integer({ minimum: 1, maximum: 1440 })),
+				scopeGlobs: Type.Optional(Type.Array(Type.String({ maxLength: 200 }), { maxItems: 100 })),
+			}, { additionalProperties: false }),
+			renderResult: compactResult,
+			async execute(_id, params) {
+				if (!fleet || !fleet.runId) throw new Error("No Run is bound.");
+				const patch: Partial<WatchdogConfig> = {};
+				if (params.enabled !== undefined) patch.enabled = params.enabled;
+				if (params.cadenceMinutes !== undefined) patch.cadenceMs = params.cadenceMinutes * 60_000;
+				if (params.stallMinutes !== undefined) patch.stallMs = params.stallMinutes * 60_000;
+				if (params.loopMinutes !== undefined) patch.loopMs = params.loopMinutes * 60_000;
+				if (params.waitRepeatCount !== undefined) patch.waitRepeatCount = params.waitRepeatCount;
+				if (params.cooldownMinutes !== undefined) patch.cooldownMs = params.cooldownMinutes * 60_000;
+				if (params.releaseGraceMinutes !== undefined) patch.releaseGraceMs = params.releaseGraceMinutes * 60_000;
+				if (params.scopeGlobs !== undefined) patch.scopeGlobs = params.scopeGlobs;
+				const config = await fleet.configureWatchdog(patch);
+				refresh();
+				return { content: [{ type: "text", text: `Watchdog ${config.enabled ? "enabled" : "disabled"} · cadence ${formatDuration(config.cadenceMs)} · stall ${formatDuration(config.stallMs)} · loop ${formatDuration(config.loopMs)} · cooldown ${formatDuration(config.cooldownMs)} · scope ${config.scopeGlobs.length ? config.scopeGlobs.join(", ") : "from task specs"}` }], details: config };
 			},
 		});
 	}
