@@ -8,6 +8,7 @@
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { OrcaState } from "../orca/machine.ts";
 import type { ActivitySeen } from "../orca/activity.ts";
+import { formatModel, resolveWorkerModel, type ModelParts } from "../orca/model.ts";
 import { DEFAULT_FLEET_CONFIG, isInProgress, summarize, type FleetState, type WorkerDetail, type WorkerRow } from "../orca/fleet.ts";
 import type { TaskSnapshot } from "../tasks/manager.ts";
 import { formatDuration, shortId } from "../text.ts";
@@ -52,14 +53,14 @@ export interface OrcaCardInput {
 	orca?: OrcaState;
 	fleet?: FleetState;
 	fleetIncomplete?: boolean;
-	/** Run objective, shown instead of the opaque run id. */
-	objective?: string;
+	/** Short current-focus label override; the Run creation objective is deliberately ignored. */
+	label?: string;
 	/** Agent, model and start time per dispatch id. */
 	details?: Map<string, WorkerDetail>;
 	/** Latest activity per dispatch id, from its terminal, and since when it is unchanged. */
 	activity?: Map<string, ActivitySeen>;
-	/** The model an agent uses when no `--model` was passed, if known. */
-	defaultModel?: (agent: string) => string | undefined;
+	/** The Pi profile model, used only after launch and worker-status evidence. */
+	defaultModel?: (agent: string) => ModelParts | undefined;
 	collapsed?: boolean;
 	maxRows?: number;
 }
@@ -213,9 +214,14 @@ export function buildOrcaCard(input: OrcaCardInput): CardModel | undefined {
 			const elapsed = detail?.startedAt != null ? formatDuration(Math.max(0, (t.settledAt ?? input.now) - detail.startedAt)) : "";
 			const human = r.ownership === "user_owned" ? " · lo manejas tú" : "";
 			const agent = detail?.agent || r.provider;
-			// A reused terminal runs whatever its owner launched: do not guess.
-			const model = detail?.model || (agent && !detail?.reusedTerminal ? input.defaultModel?.(agent) : undefined);
-			const who = [agent, model ? `${model}${detail?.model ? "" : " (por defecto)"}${detail?.effort ? ` ${detail.effort}` : ""}` : ""].filter(Boolean).join(" · ");
+			const model = resolveWorkerModel({
+				launch: detail?.model ? { provider: detail.provider, model: detail.model, thinking: detail.effort || undefined } : undefined,
+				status: detail?.statusModel,
+				profile: agent ? input.defaultModel?.(agent) : undefined,
+				reusedTerminal: detail?.reusedTerminal,
+			});
+			const modelText = formatModel(model);
+			const who = [agent, modelText ? `${modelText}${model?.source === "default" ? " (por defecto)" : ""}` : ""].filter(Boolean).join(" · ");
 			rows.push({ text: `${look.mark} agente · ${task?.title || r.taskId} · ${look.state}${elapsed ? ` · ${elapsed}` : ""}${who ? ` · ${who}` : ""}${human}`, ...(look.tone ? { tone: look.tone } : {}) });
 			if (seen) rows.push({ text: `  ↳ ${oneLine(seen.text)}`, tone: "muted" });
 		}
@@ -226,7 +232,10 @@ export function buildOrcaCard(input: OrcaCardInput): CardModel | undefined {
 	if (agents && sum?.readyTasks) rows.push({ text: `${sum.readyTasks} ${sum.readyTasks === 1 ? "tarea lista" : "tareas listas"} sin agente`, tone: "warning" });
 	if (input.fleetIncomplete) rows.push({ text: "(lista parcial)", tone: "muted" });
 
-	const name = input.objective?.trim() || (orca.runId ? shortId(orca.runId) : "orquestación");
+	const focus = fleet ? [...fleet.workers.values()].filter((t) => isInProgress(t.row) || t.row.nextAction === "release").map((t) => fleet.tasks.get(t.row.taskId)?.title || t.row.taskId) : [];
+	const uniqueFocus = [...new Set(focus)];
+	const derivedLabel = uniqueFocus.length > 1 ? `${uniqueFocus[0]} +${uniqueFocus.length - 1}` : uniqueFocus[0];
+	const name = input.label?.trim() || derivedLabel || (orca.runId ? shortId(orca.runId) : "orquestación");
 	const count = open ? ` · ${open} ${open === 1 ? "agente" : "agentes"}` : "";
 	const pending = orca.phase === "pending" || orca.phase === "acking";
 	const summary = [attention ? `${attention} ${attention === 1 ? "necesita" : "necesitan"} atención` : "", pending ? "mensajes sin procesar" : ""].filter(Boolean).join(" · ");

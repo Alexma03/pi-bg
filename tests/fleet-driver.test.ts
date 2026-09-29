@@ -2,7 +2,8 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -46,5 +47,47 @@ test("polls read-only, reports a stalled worker with its task title, and pages e
 		assert.ok(calls.every((c) => !c.includes(" check")), "fleet watch never touches the mailbox");
 	} finally {
 		fleet.dispose();
+	}
+});
+
+test("native watchdog compares committed worker changes against the Task's allowed surfaces", async () => {
+	const root = await mkdtemp(join(tmpdir(), "pi-bg-watchdog-worktree-"));
+	const state = await mkdtemp(join(tmpdir(), "pi-bg-watchdog-state-"));
+	const dir = await mkdtemp(join(tmpdir(), "pi-bg-watchdog-orca-"));
+	const git = (...args: string[]) => execFileSync("git", args, { cwd: root, stdio: "ignore" });
+	await chmod(FAKE, 0o755);
+	await writeFile(join(dir, "calls.log"), "");
+	try {
+		git("init", "-b", "main");
+		await writeFile(join(root, "src.ts"), "base\n");
+		git("add", "src.ts");
+		git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-m", "base");
+		git("branch", "origin/main");
+		git("checkout", "-b", "feat/worker");
+		await writeFile(join(root, "docs-private.md"), "outside scope\n");
+		git("add", "docs-private.md");
+		git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-m", "outside scope");
+		const row = { ...worker("ctx_scope", "working", Date.now()), workspacePath: root };
+		await writeFile(join(dir, "workers.json"), JSON.stringify({ ok: true, result: { workers: [row], page: { hasMore: false, nextCursor: null } } }));
+		await writeFile(join(dir, "tasks.json"), JSON.stringify({ ok: true, result: { tasks: [{ id: "task_ctx_scope", display_name: "scoped worker", spec: "Allowed edit surfaces:\n- `src/**`", status: "dispatched", deps: "[]" }] } }));
+		await writeFile(join(dir, "worker-read.json"), JSON.stringify({ ok: true, result: { terminal: { tail: ["Working on the implementation"] } } }));
+		const events: FleetEvent[] = [];
+		const fleet = new FleetWatch({ orcaBin: FAKE, cwd: dir, env: { ...process.env, FAKE_ORCA_DIR: dir }, now: Date.now, onEvents: (e) => events.push(...e), onChange: () => {}, activityMs: 0, watchdogPath: join(state, "orca", "watchdog.json") });
+		try {
+			fleet.watch("run_fake");
+			for (let i = 0; i < 100 && !fleet.worker("ctx_scope"); i++) await sleep(20);
+			assert.ok(fleet.worker("ctx_scope"), "worker inventory loaded");
+			await fleet.readActivity();
+			const finding = events.find((event) => event.kind === "scope");
+			assert.ok(finding, events.map((event) => `${event.kind}:${event.detail}`).join("\n"));
+			assert.match(finding.detail ?? "", /docs-private\.md/);
+			const saved = JSON.parse(await readFile(join(state, "orca", "watchdog.json"), "utf8"));
+			assert.ok(saved.state.active.some((key: string) => key.startsWith("scope:ctx_scope:")));
+			assert.equal(execFileSync("git", ["status", "--porcelain"], { cwd: root, encoding: "utf8" }), "", "watchdog scans do not write to the worker worktree");
+		} finally {
+			fleet.dispose();
+		}
+	} finally {
+		await Promise.all([rm(root, { recursive: true, force: true }), rm(state, { recursive: true, force: true }), rm(dir, { recursive: true, force: true })]);
 	}
 });

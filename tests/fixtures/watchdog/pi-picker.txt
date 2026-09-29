@@ -1,0 +1,7 @@
+╭─ Ask user question ─────────────────────────╮
+│ Which test scope should I run?              │
+│ ❯ Unit tests                                │
+│   Unit plus integration tests               │
+│   Skip tests                                │
+│ ↑↓ navigate • Enter select • Esc cancel     │
+╰─────────────────────────────────────────────╯

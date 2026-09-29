@@ -1,0 +1,5 @@
+Question: Should I continue with the migration?
+Options:
+  1. Continue
+  2. Stop
+Waiting for the coordinator's reply…

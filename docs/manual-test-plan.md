@@ -42,6 +42,15 @@ Run this plan in a throwaway Pi session in its **own** Orca terminal, with a **t
 | 3.4 | `/reload` the coordinator with open workers | No storm: at most one fleet notice for the current problems. |
 | 3.5 | Card | It shows running tasks (last line), the bridge row and the open workers; `/bg card collapse` keeps only problems. |
 
+## 2c. Native watchdog and coordinator tools (test Run only)
+
+1. `orca_watchdog {enabled:true, cadenceMinutes:1, scopeGlobs:[]}`; start a child worker whose spec includes `Allowed edit surfaces` containing `src/**` and have it change `docs/outside.md`. Expected: one `SCOPE` notice naming the path, with no repeat while it remains present.
+2. Start a Pi worker that opens an `ask_user_choice` picker and waits. Expected: one wake notice with the exact question and options; `orca_screen` shows the picker without spinner/footer noise. Also try an Orca `ask` and a final plain-text question; each should wake with its question and visible choices.
+3. Repeat a waiting phrase without tool/file progress, then leave a worker's working screen unchanged past the configured threshold. Expected: one `LOOP` or `SCREEN STALL` notice per episode; a fresh status/heartbeat resets no-change timing.
+4. Set `orca_label {label:"Lab verification"}`; the card uses it instead of the immutable Run objective and it survives `/reload`.
+5. Settle one disposable worker, then call `orca_release {dispatchId}`; use `{all:true}` only when the test Run has multiple reclaimable settled workers. Expected: native release first; terminal close is attempted only for a fresh `exited` verdict, and resolved rows leave the headline counts.
+6. Disable the watchdog with `orca_watchdog {enabled:false}`; no new watchdog findings should be emitted.
+
 ## 3. Cleanup
 
 1. Release the lab worker: `worker-release`.

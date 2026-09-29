@@ -25,11 +25,16 @@ export interface WorkerRow {
 	livenessReason: string;
 	/** Last agent-status observation (ms epoch), when live. */
 	observedAt: number | null;
+	/** Latest heartbeat/status/message timestamp reported for this Dispatch. */
+	activityAt?: number | null;
 	attention: string[];
 	requiresAction: boolean;
 	nextAction: string;
 	ownership: string;
 	provider: string;
+	workspacePath?: string;
+	pendingQuestion?: string;
+	questionOptions?: string[];
 }
 
 export interface TaskRow {
@@ -58,8 +63,23 @@ export function parseWorkerRow(raw: unknown): WorkerRow | undefined {
 	const live = rec(p.liveness);
 	const attention = rec(p.attention);
 	const resource = rec(row.resource);
+	const dispatch = rec(row.dispatch);
+	const workspace = rec(row.workspace);
+	const worktree = rec(row.worktree);
+	const pendingInput = rec(row.pendingInput ?? p.pendingInput);
+	const questionThread = rec(row.questionThread ?? p.questionThread);
+	const inputAttention = rec(attention.input);
+	const latestMessage = rec(row.latestMessage);
 	const dispatchId = s(row.dispatchId) || s(p.dispatchId);
 	if (!dispatchId) return undefined;
+	const observedAt = typeof live.observedAt === "number" ? live.observedAt : null;
+	const activityTimes = [
+		observedAt,
+		...[[row, "lastHeartbeatAt"], [row, "heartbeatAt"], [row, "lastStatusAt"], [row, "statusAt"], [row, "lastMessageAt"], [row, "updatedAt"], [p, "lastHeartbeatAt"], [p, "lastStatusAt"], [p, "lastMessageAt"], [dispatch, "lastHeartbeatAt"], [dispatch, "heartbeatAt"], [dispatch, "lastStatusAt"], [dispatch, "statusAt"], [dispatch, "lastMessageAt"], [dispatch, "updatedAt"], [latestMessage, "createdAt"], [latestMessage, "sentAt"]].map(([source, key]) => {
+			const value = (source as Record<string, unknown>)[key as string];
+			return typeof value === "number" ? value : parseOrcaTime(value);
+		}),
+	].filter((value): value is number => value !== null);
 	return {
 		dispatchId,
 		taskId: s(row.taskId) || s(p.taskId),
@@ -72,12 +92,16 @@ export function parseWorkerRow(raw: unknown): WorkerRow | undefined {
 		outcome: s(p.outcome) || "in_progress",
 		liveness: s(live.verdict) || "unverifiable",
 		livenessReason: s(live.reason),
-		observedAt: typeof live.observedAt === "number" ? live.observedAt : null,
+		observedAt,
+		activityAt: activityTimes.length ? Math.max(...activityTimes) : null,
 		attention: Array.isArray(attention.categories) ? attention.categories.filter((c): c is string => typeof c === "string") : [],
 		requiresAction: attention.requiresAction === true,
 		nextAction: s(rec(p.nextAction).kind) || "none",
 		ownership: s(resource.ownershipState),
 		provider: s(rec(p.provider).id),
+		workspacePath: s(row.workspacePath) || s(row.worktreePath) || s(row.cwd) || s(workspace.path) || s(worktree.path) || s(resource.workspacePath) || undefined,
+		pendingQuestion: s(row.pendingQuestion) || s(pendingInput.question) || s(pendingInput.text) || s(questionThread.question) || s(inputAttention.question) || s(inputAttention.prompt) || undefined,
+		questionOptions: readOptions(pendingInput.options) ?? readOptions(questionThread.options) ?? readOptions(inputAttention.options),
 	};
 }
 
@@ -86,7 +110,17 @@ export interface WorkerDetail {
 	agent: string;
 	/** Model passed with `--model`; empty when the agent uses its own default. */
 	model: string;
+	/** Provider from the effective launch options, when explicit model evidence exists. */
+	provider?: string;
+	/** Thinking level actually passed to the launched model. */
 	effort: string;
+	/** Model observed in the worker's live Pi status bar. */
+	statusModel?: { provider?: string; model: string; thinking?: string };
+	/** Local worker worktree path, when Orca reports one. */
+	worktreePath?: string;
+	/** Pending Orca ask content when exposed by worker-show. */
+	pendingQuestion?: string;
+	questionOptions?: string[];
 	/** When the worker was dispatched (ms epoch), if known. */
 	startedAt: number | null;
 	/** Dispatched into an existing terminal (`--terminal`): Orca did not launch the agent. */
@@ -108,13 +142,58 @@ export function parseWorkerShow(result: Record<string, unknown>): WorkerDetail {
 	const launch = rec(opts.launch);
 	const eff = rec(launch.effective);
 	const req = rec(launch.requested);
+	const workspace = rec(worker.workspace);
+	const worktree = rec(worker.worktree);
+	const resource = rec(worker.resource);
+	const observation = rec(result.observation);
+	const pendingInput = rec(dispatch.pendingInput ?? worker.pendingInput ?? result.pendingInput ?? observation.pendingInput);
+	const questionThread = rec(dispatch.questionThread ?? worker.questionThread ?? result.questionThread);
+	const waitingQuestion = rec(observation.agentWait);
+	const pendingQuestion = s(result.pendingQuestion) || s(result.question) || s(dispatch.pendingQuestion) || s(pendingInput.question) || s(pendingInput.text) || s(questionThread.question) || s(waitingQuestion.question) || s(waitingQuestion.prompt) || s(waitingQuestion.promptText);
+	const questionOptions = readOptions(pendingInput.options) ?? readOptions(questionThread.options) ?? readOptions(waitingQuestion.options);
+	const requestedModel = s(req.model);
+	const commandModel = explicitModelFlag(launch.command) || explicitModelFlag(opts.command) || explicitModelFlag(worker.command);
+	const commandThinking = explicitFlag(launch.command, "thinking") || explicitFlag(opts.command, "thinking") || explicitFlag(worker.command, "thinking") || explicitFlag(launch.command, "effort") || explicitFlag(opts.command, "effort") || explicitFlag(worker.command, "effort");
+	const model = requestedModel ? s(eff.model) || requestedModel : commandModel || "";
+	const thinking = model ? s(eff.thinkingLevel) || s(eff.thinking) || s(eff.effort) || s(req.thinkingLevel) || s(req.effort) || commandThinking : "";
+	const provider = model ? s(eff.provider) || s(req.provider) : "";
 	return {
 		agent: s(eff.agent) || s(req.agent) || s(opts.agent),
-		model: s(eff.model) || s(req.model),
-		effort: s(eff.effort) || s(req.effort),
+		model,
+		...(provider ? { provider } : {}),
+		effort: thinking,
+		...(pendingQuestion ? { pendingQuestion } : {}),
+		...(questionOptions ? { questionOptions } : {}),
+		...((s(worker.workspacePath) || s(worker.worktreePath) || s(worker.cwd) || s(workspace.path) || s(worktree.path) || s(resource.workspacePath)) ? { worktreePath: s(worker.workspacePath) || s(worker.worktreePath) || s(worker.cwd) || s(workspace.path) || s(worktree.path) || s(resource.workspacePath) } : {}),
 		startedAt: parseOrcaTime(dispatch.dispatchedAt) ?? parseOrcaTime(dispatch.createdAt) ?? parseOrcaTime(worker.createdAt),
 		reusedTerminal: Boolean(s(opts.terminal)),
 	};
+}
+
+function readOptions(value: unknown): string[] | undefined {
+	if (!Array.isArray(value)) return undefined;
+	const options = value.map((item) => {
+		if (typeof item === "string") return item;
+		const option = rec(item);
+		return s(option.label) || s(option.title) || s(option.text) || s(option.value);
+	}).filter(Boolean);
+	return options.length ? options : undefined;
+}
+
+function explicitModelFlag(command: unknown): string {
+	return explicitFlag(command, "model");
+}
+
+function explicitFlag(command: unknown, name: string): string {
+	const flag = `--${name}`;
+	if (Array.isArray(command)) {
+		const index = command.indexOf(flag);
+		if (index >= 0 && typeof command[index + 1] === "string") return command[index + 1];
+		const inline = command.find((arg) => typeof arg === "string" && arg.startsWith(`${flag}=`));
+		return typeof inline === "string" ? inline.slice(flag.length + 1) : "";
+	}
+	if (typeof command !== "string") return "";
+	return new RegExp(`(?:^|\\s)${flag}(?:=|\\s+)(?:"([^"]+)"|'([^']+)'|(\\S+))`).exec(command)?.slice(1).find(Boolean) ?? "";
 }
 
 export function parseWorkerPage(result: Record<string, unknown>): WorkerPage {
@@ -156,7 +235,7 @@ export function humanOwned(row: WorkerRow): boolean {
 	return row.ownership === "user_owned";
 }
 
-export type FleetEventKind = "stalled" | "quiet" | "blocked" | "exited" | "attention" | "settled" | "release" | "ready_tasks" | "fleet_idle" | "resumed";
+export type FleetEventKind = "stalled" | "quiet" | "blocked" | "exited" | "attention" | "settled" | "release" | "ready_tasks" | "fleet_idle" | "resumed" | "scope" | "stall" | "loop" | "prompt" | "finished";
 
 export interface FleetEvent {
 	kind: FleetEventKind;
@@ -219,10 +298,15 @@ export function initialFleet(): FleetState {
 const STALL_ACTIVITIES = new Set(["done", "idle"]);
 
 function activityStart(prev: Tracked | undefined, row: WorkerRow, now: number): number {
-	if (prev && prev.row.activity === row.activity) return prev.activitySince;
-	// The hook observation is when the agent reported this state; use it when
-	// it is older than now so a restart does not reset the stall clock.
-	if (row.observedAt !== null && row.observedAt <= now && row.activity !== "working") return row.observedAt;
+	const activityAt = row.activityAt ?? row.observedAt;
+	if (prev && prev.row.activity === row.activity) {
+		// Heartbeat/status messages are evidence of operator activity even when
+		// the activity label itself (for example `working`) has not changed.
+		return activityAt !== null && activityAt !== undefined && activityAt > prev.activitySince && activityAt <= now ? activityAt : prev.activitySince;
+	}
+	// The newest hook/message timestamp survives reloads and gives a better
+	// stall baseline than the time this coordinator happened to poll.
+	if (activityAt !== null && activityAt !== undefined && activityAt <= now) return activityAt;
 	return now;
 }
 

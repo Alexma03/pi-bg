@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { addWatch, initialFleet, parseTasks, parseWorkerShow, parseOrcaTime, parseWorkerPage, readyTasks, summarize, summaryLine, updateFleet, type FleetState, type TaskRow, type WorkerRow } from "../lib/orca/fleet.ts";
+import { addWatch, initialFleet, parseTasks, parseWorkerRow, parseWorkerShow, parseOrcaTime, parseWorkerPage, readyTasks, summarize, summaryLine, updateFleet, type FleetState, type TaskRow, type WorkerRow } from "../lib/orca/fleet.ts";
 
 const MIN = 60_000;
 const row = (id: string, extra: Partial<WorkerRow> = {}): WorkerRow => ({
@@ -41,6 +41,8 @@ test("parses worker-list pages and task-list rows", () => {
 				terminalState: "retained",
 				agentTerminalHandle: "term_1",
 				resource: { ownershipState: "external" },
+				lastStatusAt: "2026-09-27 16:18:16",
+				pendingInput: { question: "Proceed with the migration?", options: ["Continue", "Stop"] },
 				projection: { stage: { activity: "done" }, outcome: "in_progress", liveness: { verdict: "live", observedAt: 123 }, attention: { categories: ["input"], requiresAction: true }, nextAction: { kind: "none" }, provider: { id: "pi" } },
 			},
 			{ nope: true },
@@ -50,6 +52,9 @@ test("parses worker-list pages and task-list rows", () => {
 	assert.equal(page.rows.length, 1);
 	assert.equal(page.rows[0].activity, "done");
 	assert.equal(page.rows[0].observedAt, 123);
+	assert.equal(page.rows[0].activityAt, Date.parse("2026-09-27T16:18:16Z"));
+	assert.equal(page.rows[0].pendingQuestion, "Proceed with the migration?");
+	assert.deepEqual(page.rows[0].questionOptions, ["Continue", "Stop"]);
 	assert.deepEqual(page.rows[0].attention, ["input"]);
 	assert.equal(page.hasMore, true);
 	assert.equal(page.nextCursor, "ctx_1");
@@ -60,12 +65,22 @@ test("parses worker-list pages and task-list rows", () => {
 test("worker-show gives agent, model and dispatch time (Orca UTC without zone)", () => {
 	const detail = parseWorkerShow({
 		dispatch: { dispatchedAt: "2026-09-27 16:15:16", createdAt: "2026-09-27 16:15:10" },
-		worker: { startOptions: { agent: "pi", launch: { requested: { agent: "pi", model: null }, effective: { agent: "pi", model: "gpt-6-sol", effort: "high" } } } },
+		worker: { startOptions: { agent: "pi", launch: { requested: { agent: "pi", model: null }, effective: { agent: "pi", model: "wrong-session-model", effort: "high" } } } },
 	});
-	assert.deepEqual(detail, { agent: "pi", model: "gpt-6-sol", effort: "high", startedAt: Date.parse("2026-09-27T16:15:16Z"), reusedTerminal: false });
+	assert.deepEqual(detail, { agent: "pi", model: "", effort: "", startedAt: Date.parse("2026-09-27T16:15:16Z"), reusedTerminal: false });
+	const explicit = parseWorkerShow({
+		worker: { startOptions: { agent: "pi", launch: { requested: { agent: "pi", model: "gpt-6-luna" }, effective: { agent: "pi", provider: "openai-codex", model: "gpt-6-luna", effort: "max" } } } },
+	});
+	assert.deepEqual(explicit, { agent: "pi", model: "gpt-6-luna", provider: "openai-codex", effort: "max", startedAt: null, reusedTerminal: false });
 	assert.equal(parseOrcaTime("2026-09-27T16:16:43.690Z"), Date.parse("2026-09-27T16:16:43.690Z"));
 	assert.equal(parseOrcaTime(null), null);
 	assert.deepEqual(parseWorkerShow({}), { agent: "", model: "", effort: "", startedAt: null, reusedTerminal: false });
+	const fromCommand = parseWorkerShow({ worker: { command: "pi --model openai-codex/gpt-6-luna --thinking max", startOptions: { agent: "pi", launch: { requested: {}, effective: {} } } } });
+	assert.equal(fromCommand.model, "openai-codex/gpt-6-luna", "an explicit command flag is launch evidence even if requested metadata is absent");
+	assert.equal(fromCommand.effort, "max", "the launch command's thinking level is shown too");
+	const pending = parseWorkerShow({ dispatch: { pendingInput: { question: "Can I change the API?", options: ["Yes", "No"] } }, observation: { agentWait: { promptText: "waiting" } } });
+	assert.equal(pending.pendingQuestion, "Can I change the API?");
+	assert.deepEqual(pending.questionOptions, ["Yes", "No"]);
 	// Dispatched with --terminal: Orca did not launch the agent, so its model is unknown.
 	assert.equal(parseWorkerShow({ worker: { startOptions: { terminal: "term_x", agent: null, launch: { requested: {}, effective: {} } } } }).reusedTerminal, true);
 });
@@ -95,6 +110,14 @@ test("a worker that ends its turn without worker_done is reported once after 3 m
 test("the stall clock uses the hook observation time after a restart", () => {
 	const r = poll(initialFleet(), [row("a", { activity: "done", observedAt: 0 })], 5 * MIN);
 	assert.equal(r.events.filter((e) => e.kind === "stalled").length, 1);
+});
+
+test("recent heartbeat/status timestamps count as activity while the state label stays the same", () => {
+	let state = poll(initialFleet(), [row("a", { activity: "working", activityAt: 0 })], 0).state;
+	state = poll(state, [row("a", { activity: "working", activityAt: 9 * MIN })], 10 * MIN).state;
+	assert.equal(state.workers.get("a")?.activitySince, 9 * MIN);
+	const parsed = parseWorkerRow({ dispatchId: "ctx_message", lastHeartbeatAt: "2026-09-27 16:15:16", lastStatusAt: "2026-09-27 16:17:16", projection: { liveness: { verdict: "live", observedAt: 1 }, stage: { activity: "working" } } });
+	assert.equal(parsed?.activityAt, Date.parse("2026-09-27T16:17:16Z"));
 });
 
 test("blocked prompts are reported after one minute; human-owned terminals are not", () => {
