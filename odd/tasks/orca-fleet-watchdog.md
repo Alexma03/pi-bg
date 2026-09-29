@@ -24,3 +24,10 @@ Replace the coordinator's external scope/screen watchdog with model-free pi-bg s
 
 ## Delivery strategy
 Single PR only, per the owner's explicit one-branch/one-PR decision and approved `size:exception`; split commits by behavior. The owner authorized the current GitHub CLI session for one push and PR, directed no issue link, and selected `Refs: user request 2026-09-29 (orca-fleet-watchdog)` as the body reference.
+
+## Completed evidence
+- Feature work unit: `a35d0a5 feat(orca): add model-free fleet watchdog and worker tools`.
+- `pnpm test`: 162/162 passed; `pnpm typecheck`: passed.
+- Fake-Orca integration covers answer-aware picker notices, trimmed `orca_screen`, native release with exited-only fallback, persisted label/watchdog config, and read-only scope scans.
+- Live Orca/production Run test: not run; no production worker lifecycle or mailbox was touched.
+- Delivery: one PR with the approved size exception; no merge.
