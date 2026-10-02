@@ -846,20 +846,18 @@ export default function piBg(pi: ExtensionAPI) {
 			name: "orca_ack",
 			label: "Orca ack",
 			description:
-				"Acknowledge the pending Orca delivery after processing every message in it (answered questions, validated worker_done, release/retain decided). " +
-				"pi-bg then re-arms the Run waiter. If Orca already holds the next batch it is returned in this result and becomes the pending delivery.",
-			promptSnippet: "orca_ack: acknowledge a processed Orca delivery (pi-bg owns this coordinator's Run mailbox waiter).",
-			promptGuidelines: [
-				"This session coordinates an Orca Run through pi-bg: it keeps the only `orca orchestration check --wait` waiter and delivers each mailbox batch as an 'Orca delivery' message. Do not run consuming `orca orchestration check` or orca-wait and do not start waiters. Process every message of a delivery as the orchestration guide requires, then call orca_ack with its deliveryId. Heartbeat-only batches are acknowledged automatically.",
-				"pi-bg also watches the Run's workers model-free and sends an 'Orca fleet' message when one stalls without worker_done, waits on a prompt, exits, needs attention or awaits release. The work is not finished while workers are open: decide the next step from those notices and orca_workers.",
-			],
-			parameters: Type.Object({ deliveryId: Type.String({ description: "The deliveryId shown in the Orca delivery message." }) }, { additionalProperties: false }),
+				"This session coordinates an Orca Run through pi-bg, which owns the Run mailbox: it keeps the only waiter and delivers each batch as an 'Orca delivery' message (heartbeat-only batches are acknowledged automatically). Never run a consuming `orca orchestration check` or orca-wait yourself. " +
+				"Acknowledge a delivery after processing every message in it (questions answered, worker_done validated, release/retain decided); the mailbox stays paused until then. " +
+				"If Orca already holds the next batch it is returned in this result and becomes the pending delivery.",
+			parameters: Type.Object({ deliveryId: Type.Optional(Type.String({ description: "The delivery to acknowledge; defaults to the pending one." })) }, { additionalProperties: false }),
 			executionMode: "sequential",
 			renderResult: compactResult,
 			async execute(_id, params, _signal, _onUpdate, ctx) {
 				ctxRef = ctx;
 				if (!bridge) throw new Error("The Orca bridge is not running in this session.");
-				const reply = await bridge.ack(params.deliveryId);
+				const deliveryId = params.deliveryId || bridge.state.pending?.id;
+				if (!deliveryId) throw new Error(`No pending Orca delivery; nothing to acknowledge (bridge ${bridge.state.phase}).`);
+				const reply = await bridge.ack(deliveryId);
 				if (!reply.ok) throw new Error(reply.text);
 				const text = reply.next ? `${reply.text}\n\n${formatDelivery(reply.next, { note: reply.note, rawPath: reply.rawPath })}` : reply.text;
 				return { content: [{ type: "text", text }], details: { next: reply.next?.id } };
@@ -916,9 +914,11 @@ export default function piBg(pi: ExtensionAPI) {
 		pi.registerTool({
 			name: "orca_release",
 			label: "Orca release",
-			description: "Explicitly release one settled worker by dispatchId, or all reclaimable settled workers with all=true. Uses Orca worker-release first; only after a fresh positive exited verdict may it close that exact terminal as a fallback. It never releases a live, unsettled, user-owned or unverifiable worker.",
-			promptSnippet: "orca_release: explicitly clean up settled workers; one dispatchId or all=true, never infer release intent.",
-			parameters: Type.Object({ dispatchId: Type.Optional(Type.String()), all: Type.Optional(Type.Boolean()) }, { additionalProperties: false }),
+			description: "Release settled workers you decided to clean up: give exactly one of dispatchId (one worker) or all=true (every reclaimable settled worker); never infer release intent. Uses Orca worker-release first; only after a fresh positive exited verdict may it close that exact terminal as a fallback. It never releases a live, unsettled, user-owned or unverifiable worker.",
+			parameters: Type.Object({
+				dispatchId: Type.Optional(Type.String({ description: "Dispatch id (ctx_...) of one settled worker." })),
+				all: Type.Optional(Type.Boolean({ description: "Release every reclaimable settled worker." })),
+			}, { additionalProperties: false }),
 			renderResult: compactResult,
 			async execute(_id, params, _signal, _onUpdate, ctx) {
 				ctxRef = ctx;
@@ -955,7 +955,10 @@ export default function piBg(pi: ExtensionAPI) {
 			name: "orca_screen",
 			label: "Orca screen",
 			description: "Read a bounded, trimmed tail of one worker's terminal with spinner/footer noise removed. Read-only; preserves interactive questions and visible options.",
-			parameters: Type.Object({ dispatchId: Type.String(), lines: Type.Optional(Type.Integer({ minimum: 5, maximum: 80 })) }, { additionalProperties: false }),
+			parameters: Type.Object({
+				dispatchId: Type.String({ description: "Dispatch id (ctx_...) of the worker." }),
+				lines: Type.Optional(Type.Integer({ minimum: 5, maximum: 80, description: "Lines of screen tail (default 30)." })),
+			}, { additionalProperties: false }),
 			renderResult: compactResult,
 			async execute(_id, params, _signal, _onUpdate, ctx) {
 				if (!fleet || !fleet.runId) throw new Error("No Run is bound.");

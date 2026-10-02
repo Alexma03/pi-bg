@@ -246,6 +246,9 @@ test("coordinator in Orca: tools activate with the Run, deliveries inject, guard
 		// An unknown dispatch id is refused, not silently watched forever.
 		await until(() => readFileSync(join(dir, "calls.log"), "utf8").includes("worker-list"));
 		await assert.rejects(f.tools.get("orca_watch")!.execute("w", { dispatchId: "ctx_nope" }, undefined, undefined, f.ctx), /ctx_nope is not in the bound Run/);
+		// Without a deliveryId, orca_ack acknowledges the pending delivery.
+		const acked = await f.tools.get("orca_ack")!.execute("a", {}, undefined, undefined, f.ctx);
+		assert.match(acked.content[0].text ?? "", /d1/);
 		await f.tools.get("bg_run")!.execute("t2", { command: "sleep 0.2", timeout_s: 60 }, undefined, undefined, f.ctx);
 		await until(() => f.emitted.some((e) => e.channel === "subagent:async-complete"));
 		assert.equal(f.emitted[0].channel, "subagent:async-started");

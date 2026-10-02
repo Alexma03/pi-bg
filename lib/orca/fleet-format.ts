@@ -46,7 +46,9 @@ export function fleetEventLine(e: FleetEvent): string {
 	const who = e.dispatchId ? `${clip(clean(e.title ?? e.dispatchId), 60)} (${e.dispatchId})` : "fleet";
 	const since = e.sinceMs !== undefined ? ` for ${formatDuration(e.sinceMs)}` : "";
 	const detail = e.detail ? `: ${clean(e.detail)}` : "";
-	const notes = e.notes?.length ? `\n    your note: ${e.notes.map((n) => clip(clean(n), 300)).join(" | ")}` : "";
+	// A settled notice follows the worker_done delivery, which may already have been handled.
+	const skip = e.kind === "settled" ? " (skip it if you already acted on this worker's worker_done delivery)" : "";
+	const notes = e.notes?.length ? `\n    your note: ${e.notes.map((n) => clip(clean(n), 300)).join(" | ")}${skip}` : "";
 	return `- ${LABEL[e.kind] ?? e.kind} ${who}${since}${detail}${notes}`;
 }
 

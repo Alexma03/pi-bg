@@ -53,11 +53,11 @@ The coordinator tools (`orca_ack`, `orca_workers`, `orca_watch`, `orca_release`,
 1. **Detect.** At session start, and again after any bash `orca orchestration run-create|run-use`, the bridge runs `orca orchestration run-current`. While no Run is bound it re-checks every 2 minutes.
 2. **Wait.** It keeps exactly one `orca orchestration check --wait --json` child, **without `--types`**. Orca 1.4.212 does not type its "You have N orchestration messages" pointer while an unfiltered waiter exists, or while a delivery is outstanding. Both states are covered, so the pointer never appears.
 3. **Heartbeats.** A heartbeat-only batch is acknowledged silently: the next wait runs as `check --ack <id> --wait`.
-4. **Deliver.** Any other batch becomes an **Orca delivery** message (steer + triggerTurn).
+4. **Deliver.** Any other batch becomes an **Orca delivery** message, delivered like a task notice (steer while busy; next turn plus a wake prompt while idle).
    - It carries the delivery id, the Run, and every non-heartbeat message with its type, sender, subject, body, payload and a reply hint.
    - The full batch is saved as JSON under `~/.local/state/pi-bg/orca/`.
    - The delivery stays *pending*; no new wait starts until it is acknowledged.
-5. **Ack.** After processing every message, the model calls **`orca_ack {deliveryId}`**.
+5. **Ack.** After processing every message, the model calls **`orca_ack`** (`deliveryId` defaults to the pending delivery).
    - The bridge runs a synchronous `check --ack`. If Orca already holds the next batch, it is returned inline in the tool result.
    - Otherwise the waiter is re-armed.
    - A single reminder is sent if a delivery stays pending for more than 10 minutes.
@@ -96,7 +96,7 @@ pi-bg also sends an **Orca fleet** message on these existing transitions:
 - **fleet idle**: nobody is working while work is open;
 - **ready tasks**: tasks whose dependencies are done have no worker.
 
-Notices are coalesced over 5 s. At most 4 notices per 10 min start a turn; the rest wait for the next turn. Terminals taken over by a human are not reported as stalled or as closure debt. **The model decides what to do; pi-bg never nudges workers.**
+Notices are coalesced over 5 s, with one notice per worker condition (for example a prompt, not also blocked and attention). At most 4 notices per 10 min start a turn; beyond that they are held and sent when a slot frees. Watchdog findings, exited workers and attention always wake. Terminals taken over by a human are not reported as stalled or as closure debt. **The model decides what to do; pi-bg never nudges workers.**
 
 - `orca_workers {all?, refresh?, inbox?}` shows the fleet table (with `inbox`, the bridge state and pending delivery first): outcome, activity, agent and model, time since dispatch, and a `now:` line with what each open worker is doing and how long that has been unchanged.
 - `orca_watch {dispatchId, on?, note?}` adds events (`settled`, `any`) plus a note that comes back verbatim in the notice. Notes survive `/reload`.

@@ -3,7 +3,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { dedupeFleetEvents, mustWake } from "../lib/orca/fleet-format.ts";
+import { dedupeFleetEvents, fleetEventLine, mustWake } from "../lib/orca/fleet-format.ts";
 import type { FleetEvent } from "../lib/orca/fleet.ts";
 import { createWakeBudget, nextWakeAt, takeWake } from "../lib/wake-budget.ts";
 
@@ -57,4 +57,11 @@ test("nextWakeAt says when a spent budget frees its oldest slot", () => {
 	b = takeWake(b, 3 * MIN).budget;
 	assert.equal(nextWakeAt(b, 4 * MIN), 11 * MIN);
 	assert.equal(nextWakeAt(b, 12 * MIN), 12 * MIN, "expired slots are free");
+});
+
+test("a settled watch note says to skip it if the worker_done delivery was already handled", () => {
+	const line = fleetEventLine(ev("settled", "a", { notes: ["launch the A1 review"] }));
+	assert.match(line, /launch the A1 review/);
+	assert.match(line, /already acted on .*worker_done/);
+	assert.doesNotMatch(fleetEventLine(ev("stalled", "a", { notes: ["x"] })), /already acted/);
 });
