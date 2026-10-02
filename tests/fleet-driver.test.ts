@@ -25,6 +25,51 @@ const worker = (id: string, activity: string, observedAt: number) => ({
 	projection: { stage: { activity }, outcome: "in_progress", liveness: { verdict: "live", observedAt }, attention: { categories: [], requiresAction: false }, nextAction: { kind: "none" } },
 });
 
+test("switching the bridge off and on for the same Run does not report open workers again", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "pi-bg-fleet-"));
+	await chmod(FAKE, 0o755);
+	await writeFile(join(dir, "calls.log"), "");
+	await writeFile(join(dir, "workers.json"), JSON.stringify({ ok: true, result: { workers: [worker("ctx_a", "done", Date.now() - 10 * 60_000)], page: { hasMore: false, nextCursor: null } } }));
+	await writeFile(join(dir, "tasks.json"), JSON.stringify({ ok: true, result: { tasks: [] } }));
+	const got: FleetEvent[][] = [];
+	const fleet = new FleetWatch({ orcaBin: FAKE, cwd: dir, env: { ...process.env, FAKE_ORCA_DIR: dir }, now: Date.now, onEvents: (e) => got.push(e), onChange: () => {}, pollMs: 60_000, activityMs: 0, watchdogPath: join(dir, "watchdog.json") });
+	try {
+		fleet.watch("run_fake");
+		for (let i = 0; i < 100 && got.length === 0; i++) await sleep(20);
+		assert.ok(got.flat().some((e) => e.kind === "stalled"));
+		fleet.stop();
+		fleet.watch("run_fake");
+		await fleet.poll();
+		assert.equal(got.flat().filter((e) => e.kind === "stalled").length, 1, "reported once across off/on");
+	} finally {
+		fleet.dispose();
+	}
+});
+
+test("the release notice honours the watchdog's releaseGraceMinutes", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "pi-bg-fleet-"));
+	await chmod(FAKE, 0o755);
+	await writeFile(join(dir, "calls.log"), "");
+	await writeFile(join(dir, "tasks.json"), JSON.stringify({ ok: true, result: { tasks: [] } }));
+	const rows = (w: unknown) => writeFile(join(dir, "workers.json"), JSON.stringify({ ok: true, result: { workers: [w], page: { hasMore: false, nextCursor: null } } }));
+	let clock = Date.now();
+	const got: FleetEvent[] = [];
+	const fleet = new FleetWatch({ orcaBin: FAKE, cwd: dir, env: { ...process.env, FAKE_ORCA_DIR: dir }, now: () => clock, onEvents: (e) => got.push(...e), onChange: () => {}, pollMs: 600_000, activityMs: 0, watchdogPath: join(dir, "watchdog.json"), watchdogConfig: { releaseGraceMs: 60_000 } });
+	try {
+		await rows(worker("ctx_a", "working", clock));
+		fleet.watch("run_fake");
+		await fleet.poll();
+		const done = worker("ctx_a", "done", clock);
+		await rows({ ...done, workerState: "succeeded", projection: { ...done.projection, outcome: "succeeded", nextAction: { kind: "release" } } });
+		await fleet.poll();
+		clock += 2 * 60_000;
+		await fleet.poll();
+		assert.ok(got.some((e) => e.kind === "release" && e.dispatchId === "ctx_a"), "2 min > the configured 1 min grace");
+	} finally {
+		fleet.dispose();
+	}
+});
+
 test("polls read-only, reports a stalled worker with its task title, and pages explicitly", async () => {
 	const dir = await mkdtemp(join(tmpdir(), "pi-bg-fleet-"));
 	await chmod(FAKE, 0o755);

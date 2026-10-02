@@ -50,6 +50,8 @@ function parseWatchdogState(value: unknown): WatchdogState {
 export class FleetWatch {
 	state: FleetState = initialFleet();
 	runId: string | null = null;
+	/** The last Run watched, kept across stop() so returning to it keeps its state. */
+	private lastRunId: string | null = null;
 	/** The last poll could not read the whole fleet. */
 	incomplete = false;
 	lastPollAt: number | null = null;
@@ -159,9 +161,18 @@ export class FleetWatch {
 	/** Start (or retarget) watching a Run. A new Run starts a fresh baseline. */
 	watch(runId: string): void {
 		if (this.disposed || this.runId === runId) return;
+		// Back on the Run it watched before (bridge off/on, a fence): keep what was
+		// already reported instead of announcing every open worker again.
+		if (this.lastRunId === runId) {
+			this.runId = runId;
+			this.schedule(0);
+			this.resetActivityTimer();
+			return;
+		}
 		// Switching Runs: watches name dispatches of the previous Run and do not
 		// carry over. The first Run of a session keeps watches restored at start.
-		this.state = this.runId === null ? { ...initialFleet(), watches: this.state.watches } : initialFleet();
+		this.state = this.lastRunId === null ? { ...initialFleet(), watches: this.state.watches } : initialFleet();
+		this.lastRunId = runId;
 		this.runId = runId;
 		this.label = "";
 		this.details.clear();
@@ -180,6 +191,11 @@ export class FleetWatch {
 			this.resetActivityTimer();
 			this.deps.onChange();
 		});
+	}
+
+	/** The release grace is the watchdog's, so orca_watchdog controls both notices. */
+	private fleetConfig(): FleetConfig {
+		return { ...(this.deps.config ?? DEFAULT_FLEET_CONFIG), releaseGraceMs: this.watchdogConfig.releaseGraceMs };
 	}
 
 	stop(): void {
@@ -233,7 +249,7 @@ export class FleetWatch {
 			if (this.runId !== runId || this.disposed) return;
 			if (rows) {
 				const normalizedRows = rows.map((row) => this.resolvedRelease.has(row.dispatchId) ? { ...row, terminalState: "released", nextAction: "none" } : row);
-				const { state, events } = updateFleet(this.state, normalizedRows, tasks, this.deps.now(), this.deps.config ?? DEFAULT_FLEET_CONFIG);
+				const { state, events } = updateFleet(this.state, normalizedRows, tasks, this.deps.now(), this.fleetConfig());
 				this.state = state;
 				this.lastPollAt = this.deps.now();
 				// An incomplete inventory must not claim the fleet is idle.
@@ -318,7 +334,7 @@ export class FleetWatch {
 				}
 			}
 			if (this.runId !== runId || this.disposed) return;
-			const quiet = quietEvents(this.state, this.activity, this.deps.now(), this.deps.config ?? DEFAULT_FLEET_CONFIG);
+			const quiet = quietEvents(this.state, this.activity, this.deps.now(), this.fleetConfig());
 			if (quiet.length) this.deps.onEvents(quiet, this.state, runId);
 			if (this.deps.now() - this.watchdogLastScan >= this.watchdogConfig.cadenceMs) {
 				await this.scanWatchdog(runId, this.deps.now());
@@ -371,7 +387,7 @@ export class FleetWatch {
 				requiresInput: row.attention.includes("input"),
 				pendingQuestion: detail?.pendingQuestion || row.pendingQuestion,
 				questionOptions: detail?.questionOptions || row.questionOptions,
-				settledForMs: tracked.settledAt === null ? undefined : Math.max(0, now - tracked.settledAt),
+				settledForMs: tracked.settledAt === null || tracked.historic ? undefined : Math.max(0, now - tracked.settledAt),
 			});
 		}
 		const result = evaluateWatchdog(this.watchdogState, samples, now, this.watchdogConfig);

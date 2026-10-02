@@ -25,8 +25,8 @@ import { profileModel, type ModelParts, type PiProfileSettings } from "../lib/or
 import { releaseOne, releaseSelection } from "../lib/orca/release.ts";
 import { trimWorkerScreen } from "../lib/orca/screen.ts";
 import type { WatchdogConfig } from "../lib/orca/watchdog.ts";
-import { formatFleetNotice, formatWorkersTable, mustWake, shouldWake } from "../lib/orca/fleet-format.ts";
-import type { FleetEvent, FleetState, WatchOn } from "../lib/orca/fleet.ts";
+import { dedupeFleetEvents, formatFleetNotice, formatWorkersTable, mustWake, shouldWake } from "../lib/orca/fleet-format.ts";
+import { isInProgress, type FleetEvent, type FleetState, type WatchOn } from "../lib/orca/fleet.ts";
 import { BLOCK_REASON, classifyOrcaCommand } from "../lib/orca/guard.ts";
 import { extractJson } from "../lib/orca/cli.ts";
 import { runOrcaCli } from "../lib/orca/exec.ts";
@@ -40,7 +40,7 @@ import { formatNotices, type TaskNotice } from "../lib/tasks/notice.ts";
 import { clip, formatDuration, sanitizeTerminal } from "../lib/text.ts";
 import { buildBgCard, buildOrcaCard, foldCard, renderCardLines, type CardModel } from "../lib/ui/card.ts";
 import { deliveryView, messageFacts, type MessageFact } from "../lib/ui/delivery-view.ts";
-import { createWakeBudget, takeWake } from "../lib/wake-budget.ts";
+import { createWakeBudget, nextWakeAt, takeWake } from "../lib/wake-budget.ts";
 
 const TASK_MESSAGE = "pi-bg-task";
 const ORCA_MESSAGE = "pi-bg-orca";
@@ -138,6 +138,11 @@ export default function piBg(pi: ExtensionAPI) {
 	let noticeQueue: TaskNotice[] = [];
 	let noticeTimer: ReturnType<typeof setTimeout> | undefined;
 	let fleetQueue: FleetEvent[] = [];
+	/** Wake-worthy fleet notices waiting for the wake budget to free a slot. */
+	let heldFleet: FleetEvent[] = [];
+	let heldTimer: ReturnType<typeof setTimeout> | undefined;
+	/** Worker conditions already reported (dispatchId|group -> time), see dedupeFleetEvents. */
+	const fleetReported = new Map<string, number>();
 	let fleetTimer: ReturnType<typeof setTimeout> | undefined;
 	let wakeBudget = createWakeBudget();
 	let exitHook: (() => void) | undefined;
@@ -281,13 +286,16 @@ export default function piBg(pi: ExtensionAPI) {
 
 	const flushFleet = () => {
 		fleetTimer = undefined;
-		if (!active || !fleet || fleetQueue.length === 0) return;
-		const events = fleetQueue;
-		fleetQueue = [];
+		if (heldTimer) clearTimeout(heldTimer);
+		heldTimer = undefined;
+		if (!active || !fleet || fleetQueue.length + heldFleet.length === 0) return;
 		const runId = fleet.runId ?? "?";
-		// Remember what was reported so a /reload does not report it again.
-		const seen = events.filter((e) => e.key).map((e) => ({ ...(e.dispatchId ? { dispatchId: e.dispatchId } : {}), key: e.key as string }));
-		if (seen.length) pi.appendEntry(FLEET_SEEN_ENTRY, { runId, seen });
+		const open = [...fleet.state.workers.values()].filter((t) => isInProgress(t.row)).map((t) => t.row.dispatchId);
+		// Held notices first; then one notice per worker condition.
+		const events = [...heldFleet, ...dedupeFleetEvents(fleetQueue, fleetReported, now(), open)];
+		fleetQueue = [];
+		heldFleet = [];
+		if (events.length === 0) return;
 		const wantsWake = shouldWake(events);
 		let trigger = false;
 		if (wantsWake) {
@@ -298,12 +306,22 @@ export default function piBg(pi: ExtensionAPI) {
 				trigger = taken.allowed;
 			}
 		}
+		if (wantsWake && !trigger) {
+			// Budget spent: hold them and wake once a slot frees, instead of
+			// parking them until the user happens to type.
+			heldFleet = events;
+			heldTimer = setTimeout(flushFleet, Math.max(1_000, nextWakeAt(wakeBudget, now()) - now()));
+			heldTimer.unref?.();
+			return;
+		}
+		// Remember what was reported so a /reload does not report it again.
+		const seen = events.filter((e) => e.key).map((e) => ({ ...(e.dispatchId ? { dispatchId: e.dispatchId } : {}), key: e.key as string }));
+		if (seen.length) pi.appendEntry(FLEET_SEEN_ENTRY, { runId, seen });
 		// A notice that waits for the next turn would carry a stale snapshot.
 		const state = trigger ? liveState() : "";
-		const suffix = wantsWake && !trigger ? "\n(Several fleet notices in a short time: this one did not start a turn.)" : "";
 		const message = {
 			customType: FLEET_MESSAGE,
-			content: formatFleetNotice(events, fleet.state, runId, now()) + suffix + (state ? `\n\n${state}` : ""),
+			content: formatFleetNotice(events, fleet.state, runId, now()) + (state ? `\n\n${state}` : ""),
 			display: true,
 			details: { runId, events: events.map((e) => ({ kind: e.kind, dispatchId: e.dispatchId, title: e.title })) },
 		};
@@ -432,6 +450,10 @@ export default function piBg(pi: ExtensionAPI) {
 		attachedCalls.clear();
 		noticeQueue = [];
 		fleetQueue = [];
+		heldFleet = [];
+		if (heldTimer) clearTimeout(heldTimer);
+		heldTimer = undefined;
+		fleetReported.clear();
 		fleet?.dispose();
 		bridge?.dispose();
 		await manager?.shutdown();

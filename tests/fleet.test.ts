@@ -144,6 +144,14 @@ test("the first poll reports current problems but not settled history", () => {
 	assert.deepEqual(r.events, []);
 });
 
+test("workers already settled when watching starts are history: no release notice for them", () => {
+	const settled = (id: string) => row(id, { outcome: "succeeded", workerState: "succeeded", dispatchStatus: "completed", nextAction: "release" });
+	let r = poll(initialFleet(), [settled("old"), row("new")], 0);
+	r = poll(r.state, [settled("old"), settled("new")], 1 * MIN);
+	r = poll(r.state, [settled("old"), settled("new")], 10 * MIN);
+	assert.deepEqual(r.events.map((e) => `${e.kind}:${e.dispatchId}`), ["release:new"]);
+});
+
 test("fleet idle fires once when every open worker is quiet", () => {
 	let r = poll(initialFleet(), [row("a", { activity: "done" }), row("b", { activity: "idle" })], 0);
 	r = poll(r.state, [row("a", { activity: "done" }), row("b", { activity: "idle" })], 4 * MIN);
