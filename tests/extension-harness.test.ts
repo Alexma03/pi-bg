@@ -530,6 +530,25 @@ test("orca_release uses native release then closes only a freshly exited termina
 	});
 });
 
+test("the delegation guide joins the system prompt only in an Orca session, never in a Gentle child", async () => {
+	for (const [handle, child, expected] of [["term_coord", undefined, true], [undefined, undefined, false], ["term_coord", "1", false]] as const) {
+		const state = await mkdtemp(join(tmpdir(), "pi-bg-state-"));
+		const dir = await fakeOrcaDir("run_fake");
+		await withEnv({ ORCA_TERMINAL_HANDLE: handle, GENTLE_PI_AGENTS_CHILD: child, PI_BG_STATE_DIR: state, PI_BG_ORCA_BIN: FAKE, FAKE_ORCA_DIR: dir }, async () => {
+			const f = fakePi();
+			piBg(f.pi as never);
+			await f.fire("session_start");
+			const result = (await f.fire("before_agent_start", { systemPrompt: "BASE" })) as { systemPrompt?: string } | undefined;
+			if (expected) {
+				assert.match(result?.systemPrompt ?? "", /^BASE\n\n.*Orca worker/s);
+			} else {
+				assert.equal(result?.systemPrompt, undefined, `handle=${handle} child=${child}`);
+			}
+			await f.fire("session_shutdown");
+		});
+	}
+});
+
 test("Orca tools stay off in a non-interactive session, where no bridge runs", async () => {
 	const state = await mkdtemp(join(tmpdir(), "pi-bg-state-"));
 	const dir = await fakeOrcaDir("run_fake");

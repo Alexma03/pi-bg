@@ -44,6 +44,17 @@ Restart or `/reload` running sessions to pick it up.
 - **Logs.** Logs live in `~/.local/state/pi-bg/logs/<session>/` (mode 0600) and are pruned after 7 days. Anything copied from a log to the model or the terminal is stripped of escape sequences, redacted for common credential shapes, and size-bounded.
 - **Commands.** `/bg` lists tasks. `/bg kill <id|all>` stops them.
 
+## Delegation guide
+
+In an interactive Pi session inside an Orca terminal (not a Gentle subagent child), pi-bg appends a short guide to the system prompt on every turn. It names the layer to pick:
+
+- **`bg_run`**: a shell command with no reasoning.
+- **Gentle subagent**: a bounded unit on one front that returns its result to the conversation, in this or another worktree of the same clone.
+- **Orca worker**: delegated work that itself needs orchestration (several fronts, its own plan and subagents, long autonomy, parallel writers in separate worktrees). It is a new Pi session that orchestrates that work.
+- **`orca-cli` handoff**: work given away with no supervision.
+
+A dispatched worker is reminded that it still orchestrates its own task with Gentle subagents and `bg_run`. Outside Orca nothing is added. The guide lives in the system prompt, not in tool guidelines, because the choice is made before any tool is called and some hosts forward only tool descriptions.
+
 ## Orca mailbox bridge
 
 The bridge is active only in an interactive Pi session inside an Orca terminal (`ORCA_TERMINAL_HANDLE` is set), and never in gentle subagent children. It works as follows.

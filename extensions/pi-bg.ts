@@ -41,6 +41,7 @@ import { clip, formatDuration, sanitizeTerminal } from "../lib/text.ts";
 import { buildBgCard, buildOrcaCard, foldCard, renderCardLines, type CardModel } from "../lib/ui/card.ts";
 import { deliveryView, messageFacts, type MessageFact } from "../lib/ui/delivery-view.ts";
 import { createWakeBudget, nextWakeAt, takeWake } from "../lib/wake-budget.ts";
+import { delegationGuide } from "../lib/delegation.ts";
 
 const TASK_MESSAGE = "pi-bg-task";
 const ORCA_MESSAGE = "pi-bg-orca";
@@ -407,6 +408,13 @@ export default function piBg(pi: ExtensionAPI) {
 
 	// ---- lifecycle -------------------------------------------------------
 
+	// Delegation guide for Orca sessions (see lib/delegation.ts).
+	pi.on("before_agent_start", (event) => {
+		const guide = delegationGuide({ orca: orcaEnabled && orcaInteractive, worker: Boolean(worker.identity) });
+		if (!guide) return;
+		return { systemPrompt: `${event.systemPrompt}\n\n${guide}` };
+	});
+
 	pi.on("session_start", (_event, ctx) => {
 		ctxRef = ctx;
 		if (active) return;
@@ -741,9 +749,6 @@ export default function piBg(pi: ExtensionAPI) {
 			"watch: notify when an output line matches a regex (`until` stops the task at the first match unless keep_running; `each` notifies per match). " +
 			"timeout_s: the longest it may reasonably take (max 24 h); reaching it stops the task. Tasks die with the session.",
 		promptSnippet: "bg_run: slow (10 s or more) or never-ending commands and waits, in the background; bash for everything faster.",
-		promptGuidelines: [
-			"Delegation layers: gentle subagents for in-session exploration or parallel work; Orca workers for work in another terminal, worktree or repository; bg_run for plain shell commands. They combine freely.",
-		],
 		parameters: Type.Object(
 			{
 				command: Type.String({ description: "Shell command line, run with bash -c." }),
