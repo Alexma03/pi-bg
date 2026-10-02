@@ -870,6 +870,8 @@ export default function piBg(pi: ExtensionAPI) {
 			renderResult: compactResult,
 			async execute(_id, params) {
 				if (!fleet || !fleet.runId) throw new Error("No Run is bound, so there is no fleet to watch.");
+				if (!fleet.worker(params.dispatchId)) await fleet.poll();
+				if (!fleet.worker(params.dispatchId)) throw new Error(`Dispatch ${params.dispatchId} is not in the bound Run; use the dispatch id (ctx_...) from orca_workers.`);
 				const watch = { dispatchId: params.dispatchId, on: (params.on?.length ? params.on : ["settled", "stalled", "blocked"]) as WatchOn[], note: clip(params.note ?? "", 500), createdAt: now() };
 				fleet.addWatch(watch);
 				pi.appendEntry(WATCH_ENTRY, watch);
@@ -1028,9 +1030,15 @@ export default function piBg(pi: ExtensionAPI) {
 					return;
 				}
 				const arg = args.trim();
-				if (arg === "off") b.turnOff();
-				else if (arg === "on") b.turnOn();
-				else if (arg && arg !== "status") b.watchRun(arg);
+				const word = arg.toLowerCase();
+				if (word === "off") b.turnOff();
+				else if (word === "on") b.turnOn();
+				else if (/^run_[A-Za-z0-9]+$/.test(arg)) b.watchRun(arg);
+				else if (word && word !== "status") {
+					// A typo must not replace the bound Run and drop its pending delivery.
+					ctx.ui.notify(`Usage: /orca-watch [status|on|off|run_<id>]; "${clip(arg, 40)}" is none of them, nothing changed.`, "warning");
+					return;
+				}
 				const s = b.state;
 				const fleetLine = fleet?.runId ? `\n${formatWorkersTable(fleet.state, fleet.runId, now(), { activity: fleet.activity, details: fleet.details }).split("\n").slice(0, 8).join("\n")}` : "";
 				ctx.ui.notify(`orca bridge: ${s.phase} · run ${s.runId ?? "none"} · ${s.reason}${s.pending ? ` · pending ${s.pending.id}` : ""} · heartbeats acked ${s.heartbeatsAcked}${s.lastError ? `\nlast error: ${s.lastError}` : ""}${fleetLine}`, "info");

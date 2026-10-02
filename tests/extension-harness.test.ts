@@ -231,6 +231,16 @@ test("coordinator in Orca: tools activate with the Run, deliveries inject, guard
 		assert.equal(blocked?.block, true);
 		const peek = await f.fire("tool_call", { toolName: "bash", input: { command: "orca orchestration check --peek --json" } });
 		assert.equal(peek, undefined);
+		// A typo is not a Run id: the waiter and the pending delivery stay.
+		const notes: string[] = [];
+		const cmdCtx = { ...f.ctx, ui: { ...f.ctx.ui, notify: (text: string) => notes.push(text) } };
+		await f.commands.get("orca-watch")!.handler("stauts", cmdCtx);
+		assert.match(notes.at(-1) ?? "", /usage/i);
+		await f.commands.get("orca-watch")!.handler("STATUS", cmdCtx);
+		assert.match(notes.at(-1) ?? "", /orca bridge: pending .*pending d1/);
+		// An unknown dispatch id is refused, not silently watched forever.
+		await until(() => readFileSync(join(dir, "calls.log"), "utf8").includes("worker-list"));
+		await assert.rejects(f.tools.get("orca_watch")!.execute("w", { dispatchId: "ctx_nope" }, undefined, undefined, f.ctx), /ctx_nope is not in the bound Run/);
 		await f.tools.get("bg_run")!.execute("t2", { command: "sleep 0.2", timeout_s: 60 }, undefined, undefined, f.ctx);
 		await until(() => f.emitted.some((e) => e.channel === "subagent:async-complete"));
 		assert.equal(f.emitted[0].channel, "subagent:async-started");

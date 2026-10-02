@@ -149,6 +149,7 @@ export class OrcaBridge {
 	}
 
 	ack(deliveryId: string): Promise<AckReply> {
+		if (this.disposed) return Promise.resolve({ ok: false, text: "The Orca bridge has shut down; nothing was acknowledged." });
 		return new Promise((resolve) => {
 			this.ackWaiters.push(resolve);
 			this.dispatch({ type: "ackRequest", deliveryId, now: this.deps.now() });
@@ -181,7 +182,10 @@ export class OrcaBridge {
 				this.retryTimer = undefined;
 				return;
 			case "inject":
-				void this.saveRaw(effect.delivery).then((rawPath) => this.deps.inject(effect.delivery, effect.note, rawPath));
+				void this.saveRaw(effect.delivery).then((rawPath) => {
+					// Switched off, fenced or superseded while saving: the model must not ack it.
+					if (!this.disposed && this.state.pending?.id === effect.delivery.id) this.deps.inject(effect.delivery, effect.note, rawPath);
+				});
 				return;
 			case "runAck":
 				void this.runAck(effect.deliveryId);

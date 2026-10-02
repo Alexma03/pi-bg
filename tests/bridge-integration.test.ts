@@ -40,7 +40,7 @@ const delivery = (id: string, types: string[], extra: Record<string, unknown> = 
 	},
 });
 
-async function setup() {
+async function setup(onChange: (bridge: OrcaBridge) => void = () => {}) {
 	const dir = await mkdtemp(join(tmpdir(), "pi-bg-orca-"));
 	await mkdir(join(dir, "queue"));
 	await writeFile(join(dir, "run.json"), JSON.stringify({ ok: true, result: { run: { id: "run_fake" } } }));
@@ -55,7 +55,7 @@ async function setup() {
 		now: Date.now,
 		inject: (d, note) => injected.push({ delivery: d, note }),
 		remind: () => {},
-		onChange: () => {},
+		onChange: () => onChange(bridge),
 	});
 	const calls = async () => (await readFile(join(dir, "calls.log"), "utf8")).trim().split("\n").filter(Boolean);
 	return { dir, bridge, injected, calls };
@@ -144,4 +144,32 @@ test("dispose kills the waiter process", async () => {
 	await sleep(300);
 	// The fake waiter would answer timedOut after 5 s; nothing may arrive after dispose.
 	assert.equal(bridge.state.phase, "waiting");
+});
+
+test("a delivery dropped while its raw file is saved is not injected", async () => {
+	let off = false;
+	const { dir, bridge, injected } = await setup((b) => {
+		// The inject effect has started saving; switch off before it lands.
+		if (!off && b.state.phase === "pending") {
+			off = true;
+			b.turnOff();
+		}
+	});
+	try {
+		await enqueue(dir, delivery("d_late", ["worker_done"]));
+		bridge.start();
+		await until(() => off);
+		await sleep(300);
+		assert.equal(injected.length, 0, "no longer pending, so not shown to the model");
+	} finally {
+		bridge.dispose();
+	}
+});
+
+test("orca_ack after dispose answers at once instead of hanging", async () => {
+	const { bridge } = await setup();
+	bridge.dispose();
+	const reply = await Promise.race([bridge.ack("d_x"), sleep(500).then(() => undefined)]);
+	assert.ok(reply, "ack resolved");
+	assert.equal(reply.ok, false);
 });
