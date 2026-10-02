@@ -151,7 +151,10 @@ export default function piBg(pi: ExtensionAPI) {
 	let cardMode: "on" | "collapsed" | "off" = env.PI_BG_CARD === "off" ? "off" : "on";
 	/** Widget keys of the cards folded to one line (by a click or /bg card fold). */
 	const foldedCards = new Set<string>();
-	let orcaToolsActive: boolean | undefined;
+	/** Interactive session in an Orca terminal: the bridge and its tools run here. Set at session_start. */
+	let orcaInteractive = true;
+	/** Consecutive failed worker mail peeks, shown in the status line. */
+	let mailFailures = 0;
 	let mail: MailState = initialMail();
 	let mailTimer: ReturnType<typeof setInterval> | undefined;
 	let mailPolling = false;
@@ -175,11 +178,13 @@ export default function piBg(pi: ExtensionAPI) {
 	 */
 	const syncOrcaTools = () => {
 		if (!orcaEnabled) return;
-		const want = !worker.identity || bridgeOwnsMailbox() || bridge?.state.phase === "fenced";
-		if (orcaToolsActive === want) return;
-		orcaToolsActive = want;
+		// Only an interactive session runs the bridge, so only it gets the tools.
+		const want = orcaInteractive && (!worker.identity || bridgeOwnsMailbox() || bridge?.state.phase === "fenced");
 		try {
-			const current = pi.getActiveTools().filter((name) => !ORCA_TOOLS.includes(name));
+			// Compare with the live list: another extension may have replaced it.
+			const all = pi.getActiveTools();
+			if (want ? ORCA_TOOLS.every((name) => all.includes(name)) : !ORCA_TOOLS.some((name) => all.includes(name))) return;
+			const current = all.filter((name) => !ORCA_TOOLS.includes(name));
 			pi.setActiveTools(want ? [...current, ...ORCA_TOOLS] : current);
 		} catch {
 			/* best effort */
@@ -200,7 +205,7 @@ export default function piBg(pi: ExtensionAPI) {
 		if (!ctx?.hasUI) return;
 		try {
 			ctx.ui.setStatus(STATUS_KEY, bgStatus(manager?.running().filter((t) => !t.attached).length ?? 0));
-			ctx.ui.setStatus(ORCA_STATUS_KEY, bridge ? orcaStatus(bridge.state, now()) : undefined);
+			ctx.ui.setStatus(ORCA_STATUS_KEY, mailFailures > 0 ? `orca ⚠ correo ilegible (${mailFailures} fallos)` : bridge ? orcaStatus(bridge.state, now()) : undefined);
 		} catch {
 			/* UI may be gone during shutdown */
 		}
@@ -362,7 +367,14 @@ export default function piBg(pi: ExtensionAPI) {
 			if (!handle) return;
 			const capture = await runOrcaCli(env.PI_BG_ORCA_BIN || "orca", ["orchestration", "check", "--terminal", handle, "--peek", "--json"], { cwd: ctxRef?.cwd ?? process.cwd(), env });
 			const doc = extractJson(capture.stdout) as { ok?: unknown; result?: unknown } | undefined;
-			if (!doc || doc.ok !== true || !active || worker.identity?.dispatchId !== identity.dispatchId) return;
+			if (!active || worker.identity?.dispatchId !== identity.dispatchId) return;
+			// A failing peek must not hide coordinator mail silently; the model is not woken for it.
+			const failed = !doc || doc.ok !== true;
+			if (failed !== mailFailures > 0 || failed) {
+				mailFailures = failed ? mailFailures + 1 : 0;
+				refresh();
+			}
+			if (failed) return;
 			const decision = decideMail(mail, parsePeek(doc.result, handle), now());
 			mail = decision.state;
 			if (!decision.announce.length) return;
@@ -389,7 +401,8 @@ export default function piBg(pi: ExtensionAPI) {
 		active = true;
 		worker = initialWorker();
 		wakeBudget = createWakeBudget();
-		orcaToolsActive = undefined;
+		orcaInteractive = ctx.mode === "tui";
+		mailFailures = 0;
 		const sessionId = ctx.sessionManager.getSessionId?.() || "session";
 		manager = new TaskManager({
 			logDir: join(root, "logs", sessionId.replace(/[^A-Za-z0-9_-]/g, "_")),

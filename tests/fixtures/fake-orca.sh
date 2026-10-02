@@ -38,6 +38,10 @@ if [[ "$1 $2" == "orchestration task-list" ]]; then
 	exit 0
 fi
 if [[ "$1 $2" == "orchestration check" ]]; then
+	if [[ -f "$dir/peek-fail" && " $* " == *" --peek "* ]]; then
+		echo '{"ok":false,"error":{"code":"stable_pane_required","message":"fake"}}'
+		exit 1
+	fi
 	wait=0
 	for arg in "$@"; do [[ "$arg" == "--wait" ]] && wait=1; done
 	for _ in $(seq 1 100); do

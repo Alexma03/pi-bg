@@ -6,7 +6,7 @@
 import { test } from "node:test";
 import { readFileSync } from "node:fs";
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -36,6 +36,7 @@ function fakePi() {
 	const emitted: Array<{ channel: string; data: unknown }> = [];
 	const entries: Array<{ customType: string; data: unknown }> = [];
 	let activeTools: string[] = ["bash", "read"];
+	const statuses = new Map<string, string | undefined>();
 	const pi = {
 		registerTool: (tool: { name: string }) => tools.set(tool.name, tool as never),
 		on: (event: string, handler: Handler) => {
@@ -61,7 +62,7 @@ function fakePi() {
 		mode: "tui",
 		hasUI: false,
 		ui: {
-			setStatus: () => {},
+			setStatus: (key: string, text: string | undefined) => statuses.set(key, text),
 			setWidget: (key: string, factory: ((tui: unknown, theme: unknown) => Widget) | undefined) => {
 				if (factory) widgets.set(key, factory({ requestRender: () => {} }, { fg: (_c: string, t: string) => t }));
 				else widgets.delete(key);
@@ -77,7 +78,7 @@ function fakePi() {
 		for (const h of handlers.get(event) ?? []) last = await h(payload, ctx);
 		return last;
 	};
-	return { pi, ctx, tools, sent, userSent, state, commands, widgets, emitted, fire, active: () => activeTools };
+	return { pi, ctx, tools, sent, userSent, state, commands, widgets, emitted, statuses, fire, active: () => activeTools };
 }
 
 async function withEnv<T>(vars: Record<string, string | undefined>, fn: () => Promise<T>): Promise<T> {
@@ -516,6 +517,51 @@ test("orca_release uses native release then closes only a freshly exited termina
 		const run = JSON.parse(await readFile(join(state, "orca", "watchdog-run_fake.json"), "utf8"));
 		assert.equal(run.label, "Current run focus");
 		assert.deepEqual(run.resolvedRelease, ["ctx_release"]);
+		await f.fire("session_shutdown");
+	});
+});
+
+test("Orca tools stay off in a non-interactive session, where no bridge runs", async () => {
+	const state = await mkdtemp(join(tmpdir(), "pi-bg-state-"));
+	const dir = await fakeOrcaDir("run_fake");
+	await withEnv({ ORCA_TERMINAL_HANDLE: "term_print", GENTLE_PI_AGENTS_CHILD: undefined, PI_BG_STATE_DIR: state, PI_BG_ORCA_BIN: FAKE, FAKE_ORCA_DIR: dir }, async () => {
+		const f = fakePi();
+		(f.ctx as { mode: string }).mode = "print";
+		piBg(f.pi as never);
+		await f.fire("session_start");
+		assert.ok(!f.active().some((name) => name.startsWith("orca_")), f.active().join(","));
+		await f.fire("session_shutdown");
+	});
+});
+
+test("Orca tools come back if another extension drops them from the active list", async () => {
+	const state = await mkdtemp(join(tmpdir(), "pi-bg-state-"));
+	const dir = await fakeOrcaDir("run_fake");
+	await withEnv({ ORCA_TERMINAL_HANDLE: "term_coord", GENTLE_PI_AGENTS_CHILD: undefined, PI_BG_STATE_DIR: state, PI_BG_ORCA_BIN: FAKE, FAKE_ORCA_DIR: dir }, async () => {
+		const f = fakePi();
+		piBg(f.pi as never);
+		await f.fire("session_start");
+		await until(() => f.active().includes("orca_ack"));
+		f.pi.setActiveTools(["bash", "read"]);
+		await f.tools.get("bg_run")!.execute("t", { command: "true", timeout_s: 10 }, undefined, undefined, f.ctx);
+		await until(() => f.active().includes("orca_ack"), 4_000);
+		await f.fire("session_shutdown");
+	});
+});
+
+test("a worker whose mail peek fails sees it in the status line, without a wake", async () => {
+	const state = await mkdtemp(join(tmpdir(), "pi-bg-state-"));
+	const dir = await fakeOrcaDir(null);
+	await writeFile(join(dir, "peek-fail"), "");
+	await withEnv({ ORCA_TERMINAL_HANDLE: "term_worker", GENTLE_PI_AGENTS_CHILD: undefined, PI_BG_STATE_DIR: state, PI_BG_ORCA_BIN: FAKE, FAKE_ORCA_DIR: dir }, async () => {
+		const f = fakePi();
+		(f.ctx as { hasUI: boolean }).hasUI = true;
+		piBg(f.pi as never);
+		await f.fire("session_start");
+		await f.fire("input", { text: "orca orchestration send --from term_worker --task-id task_abc --dispatch-id ctx_abc\n=== TASK ===\nDo X" });
+		await until(() => [...f.statuses.values()].some((v) => /correo ilegible/.test(v ?? "")), 6_000);
+		assert.ok(!f.sent.some((s) => s.message.customType === "pi-bg-worker-mail"), "no wake for a failed peek");
+		await rm(join(dir, "peek-fail"));
 		await f.fire("session_shutdown");
 	});
 });
