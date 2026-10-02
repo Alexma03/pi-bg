@@ -510,11 +510,12 @@ test("orca_release uses native release then closes only a freshly exited termina
 		await f.tools.get("orca_label")!.execute("l", { label: "Current run focus" }, undefined, undefined, f.ctx);
 		await f.tools.get("orca_watchdog")!.execute("d", { enabled: false, cadenceMinutes: 3, scopeGlobs: ["src/**"] }, undefined, undefined, f.ctx);
 		const saved = JSON.parse(await readFile(join(state, "orca", "watchdog.json"), "utf8"));
-		assert.equal(saved.label, "Current run focus");
 		assert.equal(saved.config.enabled, false);
 		assert.equal(saved.config.cadenceMs, 3 * 60_000);
 		assert.deepEqual(saved.config.scopeGlobs, ["src/**"]);
-		assert.deepEqual(saved.resolvedRelease, ["ctx_release"]);
+		const run = JSON.parse(await readFile(join(state, "orca", "watchdog-run_fake.json"), "utf8"));
+		assert.equal(run.label, "Current run focus");
+		assert.deepEqual(run.resolvedRelease, ["ctx_release"]);
 		await f.fire("session_shutdown");
 	});
 });

@@ -7,7 +7,7 @@ import { runOrcaCli } from "./exec.ts";
 import { lastActivity, nextActivity, type ActivitySeen } from "./activity.ts";
 import { parsePiStatusModel } from "./model.ts";
 import { DEFAULT_WATCHDOG_CONFIG, evaluateWatchdog, gitChangedFiles, initialWatchdogState, normalizeWatchdogConfig, parseAllowedEditSurfaces, type WatchdogConfig, type WatchdogState } from "./watchdog.ts";
-import { dirname, isAbsolute } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { redact } from "../redact.ts";
 import { clip, sanitizeTerminal } from "../text.ts";
@@ -66,7 +66,7 @@ export class FleetWatch {
 	private activityTimer: ReturnType<typeof setInterval> | undefined;
 	private watchdogConfig: WatchdogConfig;
 	private watchdogState: WatchdogState = initialWatchdogState();
-	private watchdogLoaded = false;
+	private watchdogLoad: Promise<void> | undefined;
 	private watchdogLastScan = Number.NEGATIVE_INFINITY;
 	private resolvedRelease = new Set<string>();
 	private readingActivity = false;
@@ -126,14 +126,32 @@ export class FleetWatch {
 		}
 	}
 
-	private async loadWatchdog(): Promise<void> {
-		if (this.watchdogLoaded) return;
-		this.watchdogLoaded = true;
+	/** Per-Run detector state and label; the configuration file stays shared. */
+	private runStatePath(): string | undefined {
+		const file = this.deps.watchdogPath;
+		if (!file || !this.runId) return undefined;
+		return join(dirname(file), `watchdog-${this.runId.replace(/[^A-Za-z0-9_-]/g, "_")}.json`);
+	}
+
+	/** Loads once per Run; concurrent callers share the same read. */
+	private loadWatchdog(): Promise<void> {
+		this.watchdogLoad ??= this.readWatchdog();
+		return this.watchdogLoad;
+	}
+
+	private async readWatchdog(): Promise<void> {
 		const file = this.deps.watchdogPath;
 		if (!file) return;
+		const runFile = this.runStatePath();
 		try {
 			const raw = JSON.parse(await readFile(file, "utf8")) as Record<string, unknown>;
 			this.watchdogConfig = normalizeWatchdogConfig(raw.config, this.watchdogConfig);
+		} catch {
+			/* first run or old/corrupt config: keep the defaults */
+		}
+		if (!runFile) return;
+		try {
+			const raw = JSON.parse(await readFile(runFile, "utf8")) as Record<string, unknown>;
 			if (Array.isArray(raw.resolvedRelease)) this.seedReleased(raw.resolvedRelease.filter((id): id is string => typeof id === "string"));
 			if (raw.runId === this.runId) {
 				this.watchdogState = parseWatchdogState(raw.state);
@@ -148,11 +166,11 @@ export class FleetWatch {
 	private async persistWatchdog(): Promise<void> {
 		const file = this.deps.watchdogPath;
 		if (!file) return;
+		const runFile = this.runStatePath();
 		try {
 			await mkdir(dirname(file), { recursive: true, mode: 0o700 });
-			const tmp = `${file}.tmp`;
-			await writeFile(tmp, JSON.stringify({ version: 1, runId: this.runId, label: this.label, config: this.watchdogConfig, state: this.watchdogState, lastScanAt: this.watchdogLastScan, resolvedRelease: [...this.resolvedRelease] }), { mode: 0o600 });
-			await rename(tmp, file);
+			await writeAtomic(file, { version: 1, config: this.watchdogConfig });
+			if (runFile) await writeAtomic(runFile, { version: 1, runId: this.runId, label: this.label, state: this.watchdogState, lastScanAt: this.watchdogLastScan, resolvedRelease: [...this.resolvedRelease] });
 		} catch {
 			/* state persistence is best-effort; detector still runs in memory */
 		}
@@ -179,7 +197,7 @@ export class FleetWatch {
 		this.activity.clear();
 		this.tails.clear();
 		this.watchdogState = initialWatchdogState();
-		this.watchdogLoaded = false;
+		this.watchdogLoad = undefined;
 		this.watchdogLastScan = Number.NEGATIVE_INFINITY;
 		if (this.pendingSeed?.runId === runId) {
 			this.state = seedSeen(this.state, this.pendingSeed.seen);
@@ -427,4 +445,13 @@ export class FleetWatch {
 		const result = resultOf(await runOrcaCli(this.deps.orcaBin, ["orchestration", "task-list", "--run", runId, "--json"], { cwd: this.deps.cwd, env: this.deps.env }));
 		return result ? parseTasks(result) : undefined;
 	}
+}
+
+let tmpSeq = 0;
+
+/** Write JSON through a unique temporary file, so concurrent writers never share one. */
+async function writeAtomic(file: string, value: unknown): Promise<void> {
+	const tmp = `${file}.${process.pid}.${++tmpSeq}.tmp`;
+	await writeFile(tmp, JSON.stringify(value), { mode: 0o600 });
+	await rename(tmp, file);
 }

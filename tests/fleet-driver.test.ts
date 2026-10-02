@@ -126,7 +126,7 @@ test("native watchdog compares committed worker changes against the Task's allow
 			const finding = events.find((event) => event.kind === "scope");
 			assert.ok(finding, events.map((event) => `${event.kind}:${event.detail}`).join("\n"));
 			assert.match(finding.detail ?? "", /docs-private\.md/);
-			const saved = JSON.parse(await readFile(join(state, "orca", "watchdog.json"), "utf8"));
+			const saved = JSON.parse(await readFile(join(state, "orca", "watchdog-run_fake.json"), "utf8"));
 			assert.ok(saved.state.active.some((key: string) => key.startsWith("scope:ctx_scope:")));
 			assert.equal(execFileSync("git", ["status", "--porcelain"], { cwd: root, encoding: "utf8" }), "", "watchdog scans do not write to the worker worktree");
 		} finally {
@@ -134,5 +134,55 @@ test("native watchdog compares committed worker changes against the Task's allow
 		}
 	} finally {
 		await Promise.all([rm(root, { recursive: true, force: true }), rm(state, { recursive: true, force: true }), rm(dir, { recursive: true, force: true })]);
+	}
+});
+
+test("two coordinators on different Runs keep their own watchdog state and label", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "pi-bg-fleet-"));
+	await chmod(FAKE, 0o755);
+	await writeFile(join(dir, "calls.log"), "");
+	await writeFile(join(dir, "workers.json"), JSON.stringify({ ok: true, result: { workers: [], page: { hasMore: false, nextCursor: null } } }));
+	await writeFile(join(dir, "tasks.json"), JSON.stringify({ ok: true, result: { tasks: [] } }));
+	const path = join(dir, "state", "watchdog.json");
+	const make = () => new FleetWatch({ orcaBin: FAKE, cwd: dir, env: { ...process.env, FAKE_ORCA_DIR: dir }, now: Date.now, onEvents: () => {}, onChange: () => {}, pollMs: 600_000, activityMs: 0, watchdogPath: path });
+	const a = make();
+	const b = make();
+	try {
+		a.watch("run_aaa");
+		b.watch("run_bbb");
+		await Promise.all([a.setLabel("label A"), b.setLabel("label B")]);
+	} finally {
+		a.dispose();
+		b.dispose();
+	}
+	for (const [runId, label] of [["run_aaa", "label A"], ["run_bbb", "label B"]]) {
+		const reload = make();
+		try {
+			reload.watch(runId);
+			await reload.configureWatchdog({});
+			assert.equal(reload.label, label, `${runId} kept its own label`);
+		} finally {
+			reload.dispose();
+		}
+	}
+});
+
+test("a watchdog setting made while the state file is still loading is kept", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "pi-bg-fleet-"));
+	await chmod(FAKE, 0o755);
+	await writeFile(join(dir, "calls.log"), "");
+	await writeFile(join(dir, "workers.json"), JSON.stringify({ ok: true, result: { workers: [], page: { hasMore: false, nextCursor: null } } }));
+	await writeFile(join(dir, "tasks.json"), JSON.stringify({ ok: true, result: { tasks: [] } }));
+	const path = join(dir, "watchdog.json");
+	await writeFile(path, JSON.stringify({ version: 1, config: { stallMs: 20 * 60_000 } }));
+	const fleet = new FleetWatch({ orcaBin: FAKE, cwd: dir, env: { ...process.env, FAKE_ORCA_DIR: dir }, now: Date.now, onEvents: () => {}, onChange: () => {}, pollMs: 600_000, activityMs: 0, watchdogPath: path });
+	try {
+		fleet.watch("run_fake");
+		const set = await fleet.configureWatchdog({ stallMs: 7 * 60_000 });
+		assert.equal(set.stallMs, 7 * 60_000);
+		await sleep(100);
+		assert.equal(fleet.watchdog.stallMs, 7 * 60_000, "the earlier file contents did not overwrite the new setting");
+	} finally {
+		fleet.dispose();
 	}
 });
