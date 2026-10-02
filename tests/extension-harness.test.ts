@@ -358,7 +358,7 @@ test("worker mail: a coordinator message detaches the running command and reache
 		// The call ended detached: the command keeps running.
 		await f.fire("tool_execution_end", { toolCallId: "c1", toolName: "bash", result: {}, isError: false });
 		const status = await f.tools.get("bg_status")!.execute("s", {}, undefined, undefined, f.ctx);
-		assert.match(status.content[0].text ?? "", /bg1.*running/);
+		assert.match(status.content[0].text ?? "", /bg1 running .*deadline 30m00s/, "a detached command without a bash timeout gets the 30 min default");
 		await f.fire("session_shutdown");
 	});
 });
@@ -424,7 +424,7 @@ test("gentle subagent children and non-interactive sessions never auto-backgroun
 	}
 });
 
-test("worker attach: a bash call without a timeout gets 30 s, one with a timeout keeps it even in the background", async () => {
+test("worker attach: a bash call without a timeout has no deadline until it moves to the background (then 30 min); one with a timeout keeps it", async () => {
 	const state = await mkdtemp(join(tmpdir(), "pi-bg-state-"));
 	const dir = await fakeOrcaDir(null);
 	await withEnv({ ORCA_TERMINAL_HANDLE: "term_worker", GENTLE_PI_AGENTS_CHILD: undefined, PI_BG_STATE_DIR: state, PI_BG_ORCA_BIN: FAKE, FAKE_ORCA_DIR: dir }, async () => {
@@ -435,7 +435,8 @@ test("worker attach: a bash call without a timeout gets 30 s, one with a timeout
 		await f.fire("tool_call", { toolName: "bash", toolCallId: "c1", input: { command: "sleep 60" } });
 		await f.fire("tool_call", { toolName: "bash", toolCallId: "c2", input: { command: "sleep 60", timeout: 1 } });
 		const status = (await f.tools.get("bg_status")!.execute("s", {}, undefined, undefined, f.ctx)).content[0].text ?? "";
-		assert.match(status, /bg1 running .*deadline 30s/);
+		assert.match(status, /bg1 running/);
+		assert.doesNotMatch(status, /bg1 running .*deadline/, "no deadline while attached, like Pi's bash");
 		assert.match(status, /bg2 running .*deadline 1s/);
 		await sleep(1600);
 		const after = (await f.tools.get("bg_status")!.execute("s", { id: "bg2" }, undefined, undefined, f.ctx)).content[0].text ?? "";

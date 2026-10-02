@@ -60,7 +60,7 @@ const NOTICE_BATCH_MS = 400;
 const FLEET_BATCH_MS = 5_000;
 const MAX_TIMEOUT_S = 24 * 3600;
 /** A bash call without its own timeout is expected to be short. */
-const ATTACH_DEFAULT_TIMEOUT_S = 30;
+const DETACHED_DEFAULT_TIMEOUT_S = 30 * 60;
 /** A bash command still running after this moves to the background by itself. */
 const AUTO_BACKGROUND_S = 10;
 const ORCA_TOOLS = ["orca_ack", "orca_inbox", "orca_workers", "orca_watch", "orca_release", "orca_screen", "orca_label", "orca_watchdog"];
@@ -329,7 +329,7 @@ export default function piBg(pi: ExtensionAPI) {
 	const detachAll = (): Array<{ id: string; command: string }> => {
 		const moved: Array<{ id: string; command: string }> = [];
 		for (const id of attachedCalls.values()) {
-			const snap = manager?.detach(id);
+			const snap = manager?.detach(id, "mail", undefined, DETACHED_DEFAULT_TIMEOUT_S * 1000);
 			if (snap) moved.push({ id: snap.id, command: snap.command });
 		}
 		return moved;
@@ -598,10 +598,11 @@ export default function piBg(pi: ExtensionAPI) {
 		if (!(interactive || workerActive()) || !manager || env.PI_BG_ATTACH === "0" || !attachable(command)) return;
 		try {
 			const firstLine = command.split("\n")[0];
-			// The bash call's own timeout still applies once the command moves to the
-			// background; without one it is a short command and gets ATTACH_DEFAULT_TIMEOUT_S.
-			const timeoutS = typeof input.timeout === "number" && input.timeout > 0 ? input.timeout : ATTACH_DEFAULT_TIMEOUT_S;
-			const snap = await manager.start({ command, cwd: ctx.cwd, label: `bash · ${firstLine.slice(0, 60)}`, attached: true, timeoutMs: timeoutS * 1000 });
+			// The bash call's own timeout still applies, also in the background. Without
+			// one there is no deadline in the foreground, as with Pi's bash; moving to
+			// the background adds DETACHED_DEFAULT_TIMEOUT_S so nothing runs away.
+			const timeoutMs = typeof input.timeout === "number" && input.timeout > 0 ? input.timeout * 1000 : undefined;
+			const snap = await manager.start({ command, cwd: ctx.cwd, label: `bash · ${firstLine.slice(0, 60)}`, attached: true, timeoutMs });
 			attachedCalls.set(event.toolCallId, snap.id);
 			// Capped at 24 h: a larger setTimeout delay overflows and fires at once.
 			const autoS = Math.min(Number(env.PI_BG_AUTO_BACKGROUND_S ?? AUTO_BACKGROUND_S), MAX_TIMEOUT_S);
@@ -609,7 +610,7 @@ export default function piBg(pi: ExtensionAPI) {
 				const m = manager;
 				const timer = setTimeout(() => {
 					autoTimers.delete(event.toolCallId);
-					if (m.get(snap.id)?.attached) m.detach(snap.id, "slow", autoS * 1000);
+					if (m.get(snap.id)?.attached) m.detach(snap.id, "slow", autoS * 1000, DETACHED_DEFAULT_TIMEOUT_S * 1000);
 				}, autoS * 1000);
 				timer.unref?.();
 				autoTimers.set(event.toolCallId, timer);
