@@ -3,7 +3,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { dedupeFleetEvents, fleetEventLine, mustWake } from "../lib/orca/fleet-format.ts";
+import { dedupeFleetEvents, fleetEventLine, mustWake, planFleetFlush, rememberFleetEvents } from "../lib/orca/fleet-format.ts";
 import type { FleetEvent } from "../lib/orca/fleet.ts";
 import { createWakeBudget, nextWakeAt, takeWake } from "../lib/wake-budget.ts";
 
@@ -30,9 +30,10 @@ test("attention that is not about input is its own condition", () => {
 
 test("a later batch does not repeat a condition already reported for that worker", () => {
 	const memory = new Map<string, number>();
-	dedupeFleetEvents([ev("prompt", "b")], memory, 0, []);
+	rememberFleetEvents(dedupeFleetEvents([ev("prompt", "b")], memory, 0, []), memory, 0);
 	assert.deepEqual(dedupeFleetEvents([ev("blocked", "b")], memory, 2 * MIN, []), [], "same open question");
 	assert.deepEqual(shape(dedupeFleetEvents([ev("blocked", "b")], memory, 11 * MIN, [])), ["blocked:b"], "a new episode after the window");
+	rememberFleetEvents([ev("blocked", "b")], memory, 11 * MIN);
 	const noted = dedupeFleetEvents([ev("blocked", "b", { notes: ["answer it"] })], memory, 12 * MIN, []);
 	assert.equal(noted.length, 1, "a watch note is never dropped");
 });
@@ -64,4 +65,34 @@ test("a settled watch note says to skip it if the worker_done delivery was alrea
 	assert.match(line, /launch the A1 review/);
 	assert.match(line, /already acted on .*worker_done/);
 	assert.doesNotMatch(fleetEventLine(ev("stalled", "a", { notes: ["x"] })), /already acted/);
+});
+
+test("a held notice is not 'reported': a later prompt replaces it and wakes at once", () => {
+	const memory = new Map<string, number>();
+	let budget = createWakeBudget(1, 10 * MIN);
+	budget = takeWake(budget, 0).budget;
+	// Budget spent: a blocked notice with a watch note is held, not delivered.
+	const first = planFleetFlush({ held: [], fresh: [ev("blocked", "b", { notes: ["answer it"] })], memory, budget, now: 1 * MIN, openIds: ["b"] });
+	assert.deepEqual(first.send, []);
+	assert.equal(first.held.length, 1);
+	assert.equal(first.retryAt, 10 * MIN);
+	assert.equal(memory.size, 0, "nothing is remembered before delivery");
+	// The worker's prompt arrives: it replaces the held blocked notice and wakes now.
+	const second = planFleetFlush({ held: first.held, fresh: [ev("prompt", "b", { detail: "Question: proceed? Options: yes, no" })], memory, budget: first.budget, now: 2 * MIN, openIds: ["b"] });
+	assert.deepEqual(shape(second.send), ["prompt:b"]);
+	assert.equal(second.trigger, true);
+	assert.match(second.send[0].detail ?? "", /proceed\?/);
+	assert.deepEqual(second.send[0].notes, ["answer it"]);
+	assert.deepEqual(second.held, []);
+	assert.ok(memory.has("b|question"), "remembered once delivered");
+});
+
+test("a held notice is delivered once a slot frees", () => {
+	const memory = new Map<string, number>();
+	let budget = createWakeBudget(1, 10 * MIN);
+	budget = takeWake(budget, 0).budget;
+	const held = planFleetFlush({ held: [], fresh: [ev("stalled", "a")], memory, budget, now: 1 * MIN, openIds: ["a"] });
+	const later = planFleetFlush({ held: held.held, fresh: [], memory, budget: held.budget, now: held.retryAt!, openIds: ["a"] });
+	assert.deepEqual(shape(later.send), ["stalled:a"]);
+	assert.equal(later.trigger, true);
 });

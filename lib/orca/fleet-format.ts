@@ -1,6 +1,7 @@
 // Model-facing text for fleet notices and the orca_workers table. Pure.
 
 import { clip, formatDuration, sanitizeTerminal } from "../text.ts";
+import { nextWakeAt, takeWake, type WakeBudget } from "../wake-budget.ts";
 import { redact } from "../redact.ts";
 import { formatModel, resolveWorkerModel } from "./model.ts";
 import type { ActivitySeen } from "./activity.ts";
@@ -86,7 +87,8 @@ function conditionOf(e: FleetEvent): { group: string; rank: number } | undefined
  * wins and inherits the others' notes; a condition reported for a worker in the
  * last `windowMs` is not reported again unless it carries a watch note. Fleet
  * idle is dropped when every open worker already has its own notice.
- * Records what it keeps in `memory` (`dispatchId|group` -> time).
+ * Reads `memory` (`dispatchId|group` -> time) without changing it: only a
+ * delivered notice counts as reported (see rememberFleetEvents).
  */
 export function dedupeFleetEvents(events: FleetEvent[], memory: Map<string, number>, now: number, openIds: string[], windowMs = 10 * 60_000): FleetEvent[] {
 	const kept: FleetEvent[] = [];
@@ -106,11 +108,63 @@ export function dedupeFleetEvents(events: FleetEvent[], memory: Map<string, numb
 	for (const [slot, { event, notes }] of best) {
 		const last = memory.get(slot);
 		if (last !== undefined && now - last < windowMs && notes.length === 0) continue;
-		memory.set(slot, now);
 		kept.push(notes.length ? { ...event, notes: [...new Set(notes)] } : event);
 	}
 	const covered = new Set(kept.filter((e) => e.dispatchId).map((e) => e.dispatchId));
 	return kept.filter((e) => e.kind !== "fleet_idle" || openIds.length === 0 || !openIds.every((id) => covered.has(id)));
+}
+
+/** Record delivered notices, so the same worker condition is not reported again soon. */
+export function rememberFleetEvents(events: FleetEvent[], memory: Map<string, number>, now: number): void {
+	for (const e of events) {
+		const c = e.dispatchId ? conditionOf(e) : undefined;
+		if (c) memory.set(`${e.dispatchId}|${c.group}`, now);
+	}
+}
+
+export interface FleetFlushInput {
+	/** Notices held earlier because the wake budget was spent; not yet delivered. */
+	held: FleetEvent[];
+	fresh: FleetEvent[];
+	memory: Map<string, number>;
+	budget: WakeBudget;
+	now: number;
+	openIds: string[];
+}
+
+export interface FleetFlushPlan {
+	/** Deliver these now (empty when everything is held). */
+	send: FleetEvent[];
+	/** Whether the delivery starts a turn. */
+	trigger: boolean;
+	held: FleetEvent[];
+	budget: WakeBudget;
+	/** When to flush again for held notices. */
+	retryAt?: number;
+}
+
+/**
+ * Decide one fleet flush. Held and fresh notices are deduplicated together, so
+ * a more specific fresh notice (a prompt) replaces a held one (blocked) and its
+ * mandatory wake is not delayed. Only what is sent is remembered.
+ */
+export function planFleetFlush(input: FleetFlushInput): FleetFlushPlan {
+	const { memory, now } = input;
+	const events = dedupeFleetEvents([...input.held, ...input.fresh], memory, now, input.openIds);
+	if (events.length === 0) return { send: [], trigger: false, held: [], budget: input.budget };
+	let budget = input.budget;
+	let trigger = false;
+	if (shouldWake(events)) {
+		if (mustWake(events)) trigger = true;
+		else {
+			const taken = takeWake(budget, now);
+			budget = taken.budget;
+			if (!taken.allowed) return { send: [], trigger: false, held: events, budget, retryAt: nextWakeAt(budget, now) };
+			trigger = true;
+		}
+	}
+	rememberFleetEvents(events, memory, now);
+	return { send: events, trigger, held: [], budget };
 }
 
 export function formatFleetNotice(events: FleetEvent[], state: FleetState, runId: string, now: number): string {

@@ -25,7 +25,7 @@ import { profileModel, type ModelParts, type PiProfileSettings } from "../lib/or
 import { releaseOne, releaseSelection } from "../lib/orca/release.ts";
 import { trimWorkerScreen } from "../lib/orca/screen.ts";
 import type { WatchdogConfig } from "../lib/orca/watchdog.ts";
-import { dedupeFleetEvents, formatFleetNotice, formatWorkersTable, mustWake, shouldWake } from "../lib/orca/fleet-format.ts";
+import { formatFleetNotice, formatWorkersTable, planFleetFlush } from "../lib/orca/fleet-format.ts";
 import { isInProgress, type FleetEvent, type FleetState, type WatchOn } from "../lib/orca/fleet.ts";
 import { BLOCK_REASON, classifyOrcaCommand } from "../lib/orca/guard.ts";
 import { extractJson } from "../lib/orca/cli.ts";
@@ -40,7 +40,7 @@ import { formatNotices, type TaskNotice } from "../lib/tasks/notice.ts";
 import { clip, formatDuration, sanitizeTerminal } from "../lib/text.ts";
 import { buildBgCard, buildOrcaCard, foldCard, renderCardLines, type CardModel } from "../lib/ui/card.ts";
 import { deliveryView, messageFacts, type MessageFact } from "../lib/ui/delivery-view.ts";
-import { createWakeBudget, nextWakeAt, takeWake } from "../lib/wake-budget.ts";
+import { createWakeBudget } from "../lib/wake-budget.ts";
 import { delegationGuide } from "../lib/delegation.ts";
 
 const TASK_MESSAGE = "pi-bg-task";
@@ -309,29 +309,18 @@ export default function piBg(pi: ExtensionAPI) {
 		if (!active || !fleet || fleetQueue.length + heldFleet.length === 0) return;
 		const runId = fleet.runId ?? "?";
 		const open = [...fleet.state.workers.values()].filter((t) => isInProgress(t.row)).map((t) => t.row.dispatchId);
-		// Held notices first; then one notice per worker condition.
-		const events = [...heldFleet, ...dedupeFleetEvents(fleetQueue, fleetReported, now(), open)];
+		const plan = planFleetFlush({ held: heldFleet, fresh: fleetQueue, memory: fleetReported, budget: wakeBudget, now: now(), openIds: open });
 		fleetQueue = [];
-		heldFleet = [];
-		if (events.length === 0) return;
-		const wantsWake = shouldWake(events);
-		let trigger = false;
-		if (wantsWake) {
-			if (mustWake(events)) trigger = true;
-			else {
-				const taken = takeWake(wakeBudget, now());
-				wakeBudget = taken.budget;
-				trigger = taken.allowed;
-			}
-		}
-		if (wantsWake && !trigger) {
-			// Budget spent: hold them and wake once a slot frees, instead of
-			// parking them until the user happens to type.
-			heldFleet = events;
-			heldTimer = setTimeout(flushFleet, Math.max(1_000, nextWakeAt(wakeBudget, now()) - now()));
+		heldFleet = plan.held;
+		wakeBudget = plan.budget;
+		if (plan.retryAt !== undefined) {
+			// Budget spent: wake once a slot frees instead of waiting for the user.
+			heldTimer = setTimeout(flushFleet, Math.max(1_000, plan.retryAt - now()));
 			heldTimer.unref?.();
-			return;
 		}
+		const events = plan.send;
+		const trigger = plan.trigger;
+		if (events.length === 0) return;
 		// Remember what was reported so a /reload does not report it again.
 		const seen = events.filter((e) => e.key).map((e) => ({ ...(e.dispatchId ? { dispatchId: e.dispatchId } : {}), key: e.key as string }));
 		if (seen.length) pi.appendEntry(FLEET_SEEN_ENTRY, { runId, seen });
