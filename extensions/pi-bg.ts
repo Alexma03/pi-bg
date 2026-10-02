@@ -615,7 +615,8 @@ export default function piBg(pi: ExtensionAPI) {
 				timer.unref?.();
 				autoTimers.set(event.toolCallId, timer);
 			}
-			input.command = `# pi-bg ${snap.id} (moves to the background if your coordinator writes): ${firstLine.slice(0, 200)}\n${attachCommand(process.execPath, ATTACH_CLIENT, snap.logPath, snap.outputOffset, snap.id)}`;
+			const when = [interactive && Number.isFinite(autoS) && autoS > 0 ? `after ${autoS}s` : "", workerActive() ? "if your coordinator writes" : ""].filter(Boolean).join(" or ");
+			input.command = `# pi-bg ${snap.id} (${when ? `moves to the background ${when}` : "attached pi-bg task"}): ${firstLine.slice(0, 200)}\n${attachCommand(process.execPath, ATTACH_CLIENT, snap.logPath, snap.outputOffset, snap.id)}`;
 		} catch {
 			/* too many tasks or no log dir: run it the ordinary way */
 		}

@@ -391,7 +391,7 @@ test("any interactive session: a bash command still running after the threshold 
 		// Fast commands and orca lifecycle calls are left alone; others run attached.
 		const quick = { toolName: "bash", toolCallId: "q", input: { command: "echo hi" } };
 		await f.fire("tool_call", quick);
-		assert.match(quick.input.command, /attach-client/);
+		assert.match(quick.input.command, /^# pi-bg bg1 \(moves to the background after 1s\): echo hi\n.*attach-client/s, "no coordinator outside an Orca worker");
 		const slow = { toolName: "bash", toolCallId: "s", input: { command: "sleep 3; echo done", timeout: 20 } };
 		await f.fire("tool_call", slow);
 		const child = spawn("bash", ["-c", slow.input.command.split("\n").slice(1).join("\n")]);
