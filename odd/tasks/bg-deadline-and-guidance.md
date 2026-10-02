@@ -35,3 +35,9 @@ Stop pi-bg from killing un-timed bash commands at 30 s, make the bg_run tool des
 - Task 10: `54f6312` — RED 2 harness (merged tool surface); GREEN 179/179, tsc ok.
 - Task 9: `e25a518` — RED 2 (ack without id, settled note); GREEN 180/180, tsc ok.
 - Task 11: `dfbe57f` — RED 2 (module missing, prompt injection); GREEN 184/184, tsc ok.
+- Native review `review-96bb6374756bdcfc` (medium, reliability lens): one CRITICAL finding R3-deferred-dedupe (condition remembered before delivery; held blocked notice suppressed a later prompt). Corrected in `f7e47e3` (planFleetFlush, remember on delivery); targeted validation approved; acknowledgement burned. Suite 186/186, tsc ok.
+
+## Follow-ups (advisory, non-blocking)
+- R3-held-run-scope (`extensions/pi-bg.ts` flushFleet): held fleet notices are not cleared when the bridge moves to another Run.
+- R3-legacy-watchdog-state (`lib/orca/fleet-driver.ts` readWatchdog): state saved in the old shared `watchdog.json` (label, resolved releases) is not migrated to the per-Run file.
+- gentle-ai-worker subagent fails on its first turn: `~/.pi/agent/agents/gentle-ai-worker.md` uses `anthropic/claude-sonnet-5-5`; explore uses `claude-bridge/...` and works.
