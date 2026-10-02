@@ -686,18 +686,14 @@ export default function piBg(pi: ExtensionAPI) {
 		name: "bg_run",
 		label: "Background run",
 		description:
-			"Start a shell command in the background and return immediately. Only for commands that take 10 seconds or more, or that never end on their own: test suites, builds, verification gates, installs, CI watches (`gh run watch`, `gh pr checks --watch`), deploys, log tails, production watchers. " +
-			"Also for running several such commands in parallel (one bg_run each), when each takes at least a few seconds. " +
-			"Never for near-instant commands (cd, pwd, ls, cat, head, grep, rg, find, echo, git status/diff/log, reading or editing files): run those with bash, which is faster and returns the output directly. " +
-			"Output goes to a log file. When the command exits you receive a 'pi-bg' message automatically (the session wakes if idle), so do not poll or sleep: keep working, or end your turn. " +
-			"Optional watch: notify when an output line matches a regex, either once (`until`, stops the task unless keep_running) or for each match (`each`, coalesced, capped by max_events). " +
-			"timeout_s is required: pick the longest the command may reasonably take (up to 24 h); the task is stopped and reported when it is reached. Tasks, including anything they start in the background, are killed when they end, when the session exits or reloads.",
-		promptSnippet: "bg_run: run slow commands (10 s or more, or never-ending) in the background, alone or several in parallel; never for instant ones like cd, cat or grep.",
+			"Run a shell command in the background and return at once; a 'pi-bg' message with the exit status and last lines arrives when it ends (an idle session wakes). " +
+			"Pick by expected duration. Use bg_run for 10 s or more, or never-ending: test suites, builds, installs, deploys, docker builds, log tails, and any waiting (CI via `gh run watch` / `gh pr checks --watch`, polling loops, service restarts). Several slow commands at once: one bg_run each, in the same turn. " +
+			"Use bash for everything else, including anything under ~10 s (ls, cat, grep, git status, reading files): it returns the output directly. A bash call still running after 10 s moves here by itself; do not rely on that. " +
+			"Never poll or sleep for a task: keep working or end the turn; bg_tail reads its log, bg_cancel stops it. " +
+			"watch: notify when an output line matches a regex (`until` stops the task at the first match unless keep_running; `each` notifies per match). " +
+			"timeout_s: the longest it may reasonably take (max 24 h); reaching it stops the task. Tasks die with the session.",
+		promptSnippet: "bg_run: slow (10 s or more) or never-ending commands and waits, in the background; bash for everything faster.",
 		promptGuidelines: [
-			"Choose bash or bg_run by how long the command takes. Near-instant commands (cd, pwd, ls, cat, head, grep, rg, find, echo, git status/diff/log, jq on a small file) always go through bash: bg_run adds a round trip and hides the output. Use bg_run for commands that take 10 s or more or never end (test suites, builds, verify gates, installs, deploys, `gh run watch`, log watches).",
-			"To run several slow commands at once (for example lint, typecheck and tests, each taking a few seconds or more), start one bg_run per command in the same turn; each reports on its own. Do not do this for instant commands.",
-			"Waiting for something is a slow command too: CI (`gh pr checks --watch`, `gh run watch`, a `for … sleep` loop polling `gh pr checks`), deploys, ansible runs, docker builds, service restarts. Start those with bg_run from the beginning, with a watch pattern when you wait for a line, instead of a bash call with a large timeout. A bash command still running after 10 s is moved to the background by itself; do not rely on that, and do not poll or sleep for it.",
-			"After starting a bg_run, continue with other work or end the turn; its completion arrives as a 'pi-bg' message. Never loop with sleep to wait for it.",
 			"Delegation layers: gentle subagents for in-session exploration or parallel work; Orca workers for work in another terminal, worktree or repository; bg_run for plain shell commands. They combine freely.",
 		],
 		parameters: Type.Object(
