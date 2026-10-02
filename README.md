@@ -48,7 +48,7 @@ Restart or `/reload` running sessions to pick it up.
 
 The bridge is active only in an interactive Pi session inside an Orca terminal (`ORCA_TERMINAL_HANDLE` is set), and never in gentle subagent children. It works as follows.
 
-The coordinator tools (`orca_ack`, `orca_inbox`, `orca_workers`, `orca_watch`, `orca_release`, `orca_screen`, `orca_label`, `orca_watchdog`) are active in such a session from the start, even before a Run is bound. Some providers, such as claude-bridge, fix the tool list for a whole turn. Without this, a delivery that arrives in the same turn as `run-create` could not be acknowledged until the next turn. Without a Run the tools only answer that nothing is bound.
+The coordinator tools (`orca_ack`, `orca_workers`, `orca_watch`, `orca_release`, `orca_screen`, `orca_config`) are active in such a session from the start, even before a Run is bound. Some providers, such as claude-bridge, fix the tool list for a whole turn. Without this, a delivery that arrives in the same turn as `run-create` could not be acknowledged until the next turn. Without a Run the tools only answer that nothing is bound.
 
 1. **Detect.** At session start, and again after any bash `orca orchestration run-create|run-use`, the bridge runs `orca orchestration run-current`. While no Run is bound it re-checks every 2 minutes.
 2. **Wait.** It keeps exactly one `orca orchestration check --wait --json` child, **without `--types`**. Orca 1.4.212 does not type its "You have N orchestration messages" pointer while an unfiltered waiter exists, or while a delivery is outstanding. Both states are covered, so the pointer never appears.
@@ -71,7 +71,7 @@ The coordinator tools (`orca_ack`, `orca_inbox`, `orca_workers`, `orca_watch`, `
    | `consumer_fenced`, `stable_pane_required`… | Stop, then re-detect the Run. |
    | Replayed delivery (after a failed ack or a `/reload`) | Re-injected with a visible **REPLAY** note. |
 
-- **Inspect.** `orca_inbox` shows the bridge state and the pending delivery, read-only.
+- **Inspect.** `orca_workers {inbox: true}` shows the bridge state and the pending delivery, read-only.
 - **Commands.**
   - `/orca-watch` shows the status.
   - `/orca-watch on` and `/orca-watch off` switch the bridge.
@@ -98,12 +98,12 @@ pi-bg also sends an **Orca fleet** message on these existing transitions:
 
 Notices are coalesced over 5 s. At most 4 notices per 10 min start a turn; the rest wait for the next turn. Terminals taken over by a human are not reported as stalled or as closure debt. **The model decides what to do; pi-bg never nudges workers.**
 
-- `orca_workers {all?, refresh?}` shows the fleet table: outcome, activity, agent and model, time since dispatch, and a `now:` line with what each open worker is doing and how long that has been unchanged.
+- `orca_workers {all?, refresh?, inbox?}` shows the fleet table (with `inbox`, the bridge state and pending delivery first): outcome, activity, agent and model, time since dispatch, and a `now:` line with what each open worker is doing and how long that has been unchanged.
 - `orca_watch {dispatchId, on?, note?}` adds events (`settled`, `any`) plus a note that comes back verbatim in the notice. Notes survive `/reload`.
-- `orca_watchdog {enabled?, cadenceMinutes?, stallMinutes?, loopMinutes?, waitRepeatCount?, cooldownMinutes?, releaseGraceMinutes?, scopeGlobs?}` configures or disables model-free checks. `scopeGlobs: []` uses the Task spec's allowed surfaces.
+- `orca_config {label?, watchdog?: {enabled?, cadenceMinutes?, stallMinutes?, loopMinutes?, waitRepeatCount?, cooldownMinutes?, releaseGraceMinutes?, scopeGlobs?}}` sets the Run-card label and/or configures or disables model-free checks. `scopeGlobs: []` uses the Task spec's allowed surfaces.
 - `orca_screen {dispatchId, lines?}` reads a bounded screen tail with spinner/footer noise removed; picker questions and options remain visible.
 - `orca_release {dispatchId}` releases one explicitly selected settled worker; `orca_release {all:true}` handles all reclaimable settled workers. It uses Orca's native release first and closes an exact terminal only after fresh positive `exited` evidence.
-- `orca_label {label}` sets a short current-focus Run-card label that survives reload; without one, the card uses current worker Task titles rather than the stale Run-creation objective.
+- `orca_config {label}` sets a short current-focus Run-card label that survives reload; without one, the card uses current worker Task titles rather than the stale Run-creation objective.
 
 Model display uses explicit launch model/thinking options, then the worker's visible Pi status bar, then the Pi project/personal profile default (marked `(por defecto)`). It never copies the coordinator's current model.
 
@@ -138,7 +138,7 @@ A dispatched worker loses the coordinator tools as soon as its preamble arrives,
   - **"⏵ Segundo plano"** lists background work only: `bg_run` tasks, plus a worker's bash command once it has moved to the background. A command the agent is still waiting on does not appear, and neither does an internal `bgN` id. The time comes first, so a long command never hides it:
     - `⏵ 3m21s de 30m00s · infra verify.sh · ok 12/40`: running for 3m21s of its 30-minute deadline, then its label or command (clipped) and its last output line;
     - `✔ terminó bien · 20s · prueba idle`: finished ones lead with a plain outcome ("terminó bien", "falló (código 7)", "encontró el patrón", "tiempo agotado"…).
-  - **"⇄ Orca · <current focus>"** uses a short `orca_label` override or current worker Task titles (not the stale Run creation objective) and shows one entry per open agent.
+  - **"⇄ Orca · <current focus>"** uses a short `orca_config {label}` override or current worker Task titles (not the stale Run creation objective) and shows one entry per open agent.
     - First line: `agente ·`, the task title, its state ("trabajando", "esperando", "parado 5m sin terminar", "esperando una respuesta en su terminal", "terminó · falta cerrarlo"), the time since dispatch, the agent and provider/model plus thinking level. Evidence order is explicit launch options, the worker's visible Pi status bar, then project/personal profile default (marked "(por defecto)"). A reused terminal gets no guessed profile default.
     - Second line, dimmed (`↳`): what the worker is doing now, refreshed every 2 min from the tail of its terminal (`worker-read`, sanitized and redacted). It shows a background task it is waiting on, else its last tool action (`$ command`, `read file`, `bg_run · …`), else the last line it wrote. A tool call whose arguments are still being written (`write ...`, `$ ...`) is described in words, followed by what the agent said just before: `escribiendo un fichero · Writing the report now.`
     - Agent, launch model and start time come from `worker-show`; visible model/thinking is parsed from the worker's terminal status bar. These reads are read-only; launch details are cached.

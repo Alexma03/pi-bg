@@ -107,5 +107,5 @@ export function classifyOrcaCommand(command: string): OrcaCommandKind[] {
 
 export const BLOCK_REASON =
 	"pi-bg owns this Run's Orca mailbox: it keeps the only `check --wait` waiter and delivers every batch as an \"Orca delivery\" message. " +
-	"Do not run a consuming `orca orchestration check` or orca-wait. Use orca_inbox to see the pending delivery and orca_ack to acknowledge it " +
+	"Do not run a consuming `orca orchestration check` or orca-wait. Use orca_workers {inbox: true} to see the pending delivery and orca_ack to acknowledge it " +
 	"after processing. Read-only `check --peek` / `--all` are allowed. /orca-watch off disables the bridge.";

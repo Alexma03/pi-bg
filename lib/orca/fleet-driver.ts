@@ -211,7 +211,7 @@ export class FleetWatch {
 		});
 	}
 
-	/** The release grace is the watchdog's, so orca_watchdog controls both notices. */
+	/** The release grace is the watchdog's, so orca_config {watchdog} controls both notices. */
 	private fleetConfig(): FleetConfig {
 		return { ...(this.deps.config ?? DEFAULT_FLEET_CONFIG), releaseGraceMs: this.watchdogConfig.releaseGraceMs };
 	}

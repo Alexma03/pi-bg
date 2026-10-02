@@ -26,7 +26,7 @@ export function stateBlock(input: { now: number; tasks: TaskSnapshot[]; orca?: O
 	const orca = input.orca;
 	if (orca && orca.phase !== "off") {
 		if (orca.phase === "pending" || orca.phase === "acking") {
-			lines.push(`Orca delivery ${orca.pending?.id} is pending: process all its messages, then orca_ack. The Run mailbox is paused until then (orca_inbox shows it).`);
+			lines.push(`Orca delivery ${orca.pending?.id} is pending: process all its messages, then orca_ack. The Run mailbox is paused until then (orca_workers {inbox: true} shows it).`);
 		} else if (orca.phase === "backoff" || orca.phase === "fenced") {
 			lines.push(`Orca bridge ${orca.phase}: ${orca.reason}.`);
 		} else {

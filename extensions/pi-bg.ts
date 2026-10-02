@@ -63,7 +63,7 @@ const MAX_TIMEOUT_S = 24 * 3600;
 const DETACHED_DEFAULT_TIMEOUT_S = 30 * 60;
 /** A bash command still running after this moves to the background by itself. */
 const AUTO_BACKGROUND_S = 10;
-const ORCA_TOOLS = ["orca_ack", "orca_inbox", "orca_workers", "orca_watch", "orca_release", "orca_screen", "orca_label", "orca_watchdog"];
+const ORCA_TOOLS = ["orca_ack", "orca_workers", "orca_watch", "orca_release", "orca_screen", "orca_config"];
 /** The prompt pi-bg sends to wake an idle session; not new direction from the user. */
 const WAKE_PREFIX = "⟳ pi-bg: ";
 
@@ -281,12 +281,24 @@ export default function piBg(pi: ExtensionAPI) {
 		wake(
 			{
 				customType: ORCA_MESSAGE,
-				content: `Orca delivery ${delivery.id} has been pending for over 10 minutes. The Run mailbox is paused until it is acknowledged: finish processing it and call orca_ack with deliveryId "${delivery.id}", or tell the user what blocks it. orca_inbox shows it again.`,
+				content: `Orca delivery ${delivery.id} has been pending for over 10 minutes. The Run mailbox is paused until it is acknowledged: finish processing it and call orca_ack with deliveryId "${delivery.id}", or tell the user what blocks it. orca_workers {inbox: true} shows it again.`,
 				display: true,
 				details: { deliveryId: delivery.id, runId: delivery.runId, reminder: true },
 			},
 			`Orca delivery ${delivery.id} still pending`,
 		);
+	};
+
+	/** Bridge state and the pending delivery, for orca_workers {inbox: true}. */
+	const inboxText = (): string => {
+		if (!bridge) return "The Orca bridge is not running in this session.";
+		const s = bridge.state;
+		const lines = [
+			`bridge: ${s.phase} · run ${s.runId ?? "none"}${s.explicitRun ? " (explicit)" : ""} · ${s.reason}`,
+			`deliveries shown: ${s.deliveriesInjected} · heartbeats auto-acked: ${s.heartbeatsAcked}${s.lastError ? ` · last error: ${s.lastError}` : ""}`,
+		];
+		if (s.pending) lines.push("", formatDelivery(s.pending));
+		return lines.join("\n");
 	};
 
 	const flushFleet = () => {
@@ -855,37 +867,24 @@ export default function piBg(pi: ExtensionAPI) {
 		});
 
 		pi.registerTool({
-			name: "orca_inbox",
-			label: "Orca inbox",
-			description: "Show the Orca bridge state and the pending delivery again (for example after compaction). Read-only: it never consumes or acknowledges mail.",
-			parameters: Type.Object({}, { additionalProperties: false }),
-			renderResult: compactResult,
-			async execute() {
-				if (!bridge) return { content: [{ type: "text", text: "The Orca bridge is not running in this session." }], details: undefined };
-				const s = bridge.state;
-				const lines = [
-					`bridge: ${s.phase} · run ${s.runId ?? "none"}${s.explicitRun ? " (explicit)" : ""} · ${s.reason}`,
-					`deliveries shown: ${s.deliveriesInjected} · heartbeats auto-acked: ${s.heartbeatsAcked}${s.lastError ? ` · last error: ${s.lastError}` : ""}`,
-				];
-				if (s.pending) lines.push("", formatDelivery(s.pending));
-				return { content: [{ type: "text", text: lines.join("\n") }], details: undefined };
-			},
-		});
-
-		pi.registerTool({
 			name: "orca_workers",
 			label: "Orca workers",
-			description: "Show the fleet of the bound Run (read-only): each open worker with outcome, activity and its age, agent and model, what it is doing now (from its terminal) and how long that has been unchanged, liveness, attention and nextAction, plus tasks that have no worker. all=true includes settled history; refresh=true polls Orca now.",
-			parameters: Type.Object({ all: Type.Optional(Type.Boolean()), refresh: Type.Optional(Type.Boolean()) }, { additionalProperties: false }),
+			description: "Show the fleet of the bound Run (read-only): each open worker with outcome, activity and its age, agent and model, what it is doing now (from its terminal) and how long that has been unchanged, liveness, attention and nextAction, plus tasks that have no worker. inbox=true adds the mailbox bridge state and the pending delivery (e.g. after compaction); it never consumes or acknowledges mail.",
+			parameters: Type.Object({
+				all: Type.Optional(Type.Boolean({ description: "Include settled and released workers." })),
+				refresh: Type.Optional(Type.Boolean({ description: "Poll Orca now instead of using the last poll." })),
+				inbox: Type.Optional(Type.Boolean({ description: "Prepend the bridge state and the pending delivery." })),
+			}, { additionalProperties: false }),
 			renderResult: compactResult,
 			async execute(_id, params) {
-				if (!fleet || !fleet.runId) return { content: [{ type: "text", text: "No Run is bound, so there is no fleet to show." }], details: undefined };
+				const inbox = params.inbox ? `${inboxText()}\n\n` : "";
+				if (!fleet || !fleet.runId) return { content: [{ type: "text", text: `${inbox}No Run is bound, so there is no fleet to show.` }], details: undefined };
 				if (params.refresh || fleet.lastPollAt === null) {
 					await fleet.poll();
 					await fleet.readActivity();
 				}
 				const header = fleet.lastError ? `(warning: ${fleet.lastError})\n` : "";
-				return { content: [{ type: "text", text: header + formatWorkersTable(fleet.state, fleet.runId, now(), { all: params.all, activity: fleet.activity, details: fleet.details }) }], details: undefined };
+				return { content: [{ type: "text", text: inbox + header + formatWorkersTable(fleet.state, fleet.runId, now(), { all: params.all, activity: fleet.activity, details: fleet.details }) }], details: undefined };
 			},
 		});
 
@@ -974,48 +973,47 @@ export default function piBg(pi: ExtensionAPI) {
 		});
 
 		pi.registerTool({
-			name: "orca_label",
-			label: "Orca label",
-			description: "Set a short coordinator-owned label for the bound Run header; it survives reload. Empty string clears it. The original Run objective is not used as a live status label.",
-			parameters: Type.Object({ label: Type.String({ maxLength: 80, description: "Short current focus, up to 80 characters; empty clears." }) }, { additionalProperties: false }),
-			renderResult: compactResult,
-			async execute(_id, params) {
-				if (!fleet || !fleet.runId) throw new Error("No Run is bound.");
-				const label = await fleet.setLabel(params.label);
-				refresh();
-				return { content: [{ type: "text", text: label ? `Run card label set to: ${label}` : "Run card label cleared; showing current worker task titles instead." }], details: { label } };
-			},
-		});
-
-		pi.registerTool({
-			name: "orca_watchdog",
-			label: "Orca watchdog",
-			description: "Configure the native model-free worker watchdog. Defaults: 2-minute scans, 10-minute unchanged-screen stall, 6-minute waiting-loop detection, 30-minute finding cooldown. Scope globs override each Task spec's Allowed edit surfaces; [] uses the spec. Disable with enabled=false. It reports new findings only and never writes to worker repos or steers/releases workers.",
+			name: "orca_config",
+			label: "Orca config",
+			description: "Set the bound Run's card label and/or configure the model-free worker watchdog; give label, watchdog or both. label: a short current focus (max 80 chars) that survives reload; empty clears it. watchdog: defaults are 2-minute scans, 10-minute unchanged-screen stall, 6-minute waiting-loop detection, 3-minute release grace, 30-minute finding cooldown; scopeGlobs override each Task spec's Allowed edit surfaces ([] uses the spec); enabled=false turns it off. The watchdog only reports new findings; it never writes to worker repos or steers/releases workers.",
 			parameters: Type.Object({
-				enabled: Type.Optional(Type.Boolean()),
-				cadenceMinutes: Type.Optional(Type.Integer({ minimum: 1, maximum: 30 })),
-				stallMinutes: Type.Optional(Type.Integer({ minimum: 1, maximum: 360 })),
-				loopMinutes: Type.Optional(Type.Integer({ minimum: 1, maximum: 360 })),
-				waitRepeatCount: Type.Optional(Type.Integer({ minimum: 2, maximum: 10 })),
-				cooldownMinutes: Type.Optional(Type.Integer({ minimum: 1, maximum: 1440 })),
-				releaseGraceMinutes: Type.Optional(Type.Integer({ minimum: 1, maximum: 1440 })),
-				scopeGlobs: Type.Optional(Type.Array(Type.String({ maxLength: 200 }), { maxItems: 100 })),
+				label: Type.Optional(Type.String({ maxLength: 80, description: "Short current focus for the Run card; empty clears it." })),
+				watchdog: Type.Optional(Type.Object({
+					enabled: Type.Optional(Type.Boolean()),
+					cadenceMinutes: Type.Optional(Type.Integer({ minimum: 1, maximum: 30 })),
+					stallMinutes: Type.Optional(Type.Integer({ minimum: 1, maximum: 360 })),
+					loopMinutes: Type.Optional(Type.Integer({ minimum: 1, maximum: 360 })),
+					waitRepeatCount: Type.Optional(Type.Integer({ minimum: 2, maximum: 10 })),
+					cooldownMinutes: Type.Optional(Type.Integer({ minimum: 1, maximum: 1440 })),
+					releaseGraceMinutes: Type.Optional(Type.Integer({ minimum: 1, maximum: 1440 })),
+					scopeGlobs: Type.Optional(Type.Array(Type.String({ maxLength: 200 }), { maxItems: 100 })),
+				}, { additionalProperties: false, description: "Watchdog settings; durations in minutes." })),
 			}, { additionalProperties: false }),
 			renderResult: compactResult,
 			async execute(_id, params) {
 				if (!fleet || !fleet.runId) throw new Error("No Run is bound.");
-				const patch: Partial<WatchdogConfig> = {};
-				if (params.enabled !== undefined) patch.enabled = params.enabled;
-				if (params.cadenceMinutes !== undefined) patch.cadenceMs = params.cadenceMinutes * 60_000;
-				if (params.stallMinutes !== undefined) patch.stallMs = params.stallMinutes * 60_000;
-				if (params.loopMinutes !== undefined) patch.loopMs = params.loopMinutes * 60_000;
-				if (params.waitRepeatCount !== undefined) patch.waitRepeatCount = params.waitRepeatCount;
-				if (params.cooldownMinutes !== undefined) patch.cooldownMs = params.cooldownMinutes * 60_000;
-				if (params.releaseGraceMinutes !== undefined) patch.releaseGraceMs = params.releaseGraceMinutes * 60_000;
-				if (params.scopeGlobs !== undefined) patch.scopeGlobs = params.scopeGlobs;
-				const config = await fleet.configureWatchdog(patch);
+				if (params.label === undefined && params.watchdog === undefined) throw new Error("Give label or watchdog (or both).");
+				const out: string[] = [];
+				if (params.label !== undefined) {
+					const label = await fleet.setLabel(params.label);
+					out.push(label ? `Run card label set to: ${label}` : "Run card label cleared; showing current worker task titles instead.");
+				}
+				if (params.watchdog) {
+					const w = params.watchdog;
+					const patch: Partial<WatchdogConfig> = {};
+					if (w.enabled !== undefined) patch.enabled = w.enabled;
+					if (w.cadenceMinutes !== undefined) patch.cadenceMs = w.cadenceMinutes * 60_000;
+					if (w.stallMinutes !== undefined) patch.stallMs = w.stallMinutes * 60_000;
+					if (w.loopMinutes !== undefined) patch.loopMs = w.loopMinutes * 60_000;
+					if (w.waitRepeatCount !== undefined) patch.waitRepeatCount = w.waitRepeatCount;
+					if (w.cooldownMinutes !== undefined) patch.cooldownMs = w.cooldownMinutes * 60_000;
+					if (w.releaseGraceMinutes !== undefined) patch.releaseGraceMs = w.releaseGraceMinutes * 60_000;
+					if (w.scopeGlobs !== undefined) patch.scopeGlobs = w.scopeGlobs;
+					const config = await fleet.configureWatchdog(patch);
+					out.push(`Watchdog ${config.enabled ? "enabled" : "disabled"} · cadence ${formatDuration(config.cadenceMs)} · stall ${formatDuration(config.stallMs)} · loop ${formatDuration(config.loopMs)} · release grace ${formatDuration(config.releaseGraceMs)} · cooldown ${formatDuration(config.cooldownMs)} · scope ${config.scopeGlobs.length ? config.scopeGlobs.join(", ") : "from task specs"}`);
+				}
 				refresh();
-				return { content: [{ type: "text", text: `Watchdog ${config.enabled ? "enabled" : "disabled"} · cadence ${formatDuration(config.cadenceMs)} · stall ${formatDuration(config.stallMs)} · loop ${formatDuration(config.loopMs)} · cooldown ${formatDuration(config.cooldownMs)} · scope ${config.scopeGlobs.length ? config.scopeGlobs.join(", ") : "from task specs"}` }], details: config };
+				return { content: [{ type: "text", text: out.join("\n") }], details: undefined };
 			},
 		});
 	}
