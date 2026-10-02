@@ -19,3 +19,9 @@ export function takeWake(budget: WakeBudget, now: number): { allowed: boolean; b
 	if (wakes.length >= budget.maxWakes) return { allowed: false, budget: { ...budget, wakes } };
 	return { allowed: true, budget: { ...budget, wakes: [...wakes, now] } };
 }
+
+/** When a notice may start a turn again: now if a slot is free, else when the oldest expires. */
+export function nextWakeAt(budget: WakeBudget, now: number): number {
+	const wakes = budget.wakes.filter((t) => now - t < budget.windowMs);
+	return wakes.length < budget.maxWakes ? now : Math.min(...wakes) + budget.windowMs;
+}

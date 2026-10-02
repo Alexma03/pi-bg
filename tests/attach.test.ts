@@ -61,6 +61,22 @@ test("detach: the client returns at once, the command keeps running and its noti
 	assert.equal(manager.detach(snap.id), undefined, "a finished task cannot be detached");
 });
 
+test("detach: a task without a deadline gets the default one, counted from its start; an existing deadline stays", async () => {
+	const { manager, notices } = await makeManager();
+	const open = await manager.start({ command: "sleep 30", cwd: tmpdir(), attached: true });
+	const timed = await manager.start({ command: "sleep 30", cwd: tmpdir(), attached: true, timeoutMs: 20_000 });
+	assert.equal(open.timeoutMs, undefined, "no deadline while attached");
+	await sleep(200);
+	assert.equal(manager.detach(open.id, "slow", 200, 600)?.timeoutMs, 600);
+	assert.equal(manager.detach(timed.id, "slow", 200, 600)?.timeoutMs, 20_000);
+	for (let i = 0; i < 40 && !notices.length; i++) await sleep(50);
+	assert.equal(notices.length, 1);
+	assert.equal(notices[0].id, open.id);
+	assert.equal(notices[0].kind, "timeout");
+	assert.equal(manager.get(timed.id)?.status, "running");
+	manager.cancel(timed.id);
+});
+
 test("cancel while attached: the client exits non-zero", async () => {
 	const { manager } = await makeManager();
 	const snap = await manager.start({ command: "sleep 30", cwd: tmpdir(), attached: true });

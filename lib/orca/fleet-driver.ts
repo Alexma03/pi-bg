@@ -7,7 +7,7 @@ import { runOrcaCli } from "./exec.ts";
 import { lastActivity, nextActivity, type ActivitySeen } from "./activity.ts";
 import { parsePiStatusModel } from "./model.ts";
 import { DEFAULT_WATCHDOG_CONFIG, evaluateWatchdog, gitChangedFiles, initialWatchdogState, normalizeWatchdogConfig, parseAllowedEditSurfaces, type WatchdogConfig, type WatchdogState } from "./watchdog.ts";
-import { dirname, isAbsolute } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { redact } from "../redact.ts";
 import { clip, sanitizeTerminal } from "../text.ts";
@@ -50,6 +50,8 @@ function parseWatchdogState(value: unknown): WatchdogState {
 export class FleetWatch {
 	state: FleetState = initialFleet();
 	runId: string | null = null;
+	/** The last Run watched, kept across stop() so returning to it keeps its state. */
+	private lastRunId: string | null = null;
 	/** The last poll could not read the whole fleet. */
 	incomplete = false;
 	lastPollAt: number | null = null;
@@ -64,7 +66,7 @@ export class FleetWatch {
 	private activityTimer: ReturnType<typeof setInterval> | undefined;
 	private watchdogConfig: WatchdogConfig;
 	private watchdogState: WatchdogState = initialWatchdogState();
-	private watchdogLoaded = false;
+	private watchdogLoad: Promise<void> | undefined;
 	private watchdogLastScan = Number.NEGATIVE_INFINITY;
 	private resolvedRelease = new Set<string>();
 	private readingActivity = false;
@@ -124,14 +126,32 @@ export class FleetWatch {
 		}
 	}
 
-	private async loadWatchdog(): Promise<void> {
-		if (this.watchdogLoaded) return;
-		this.watchdogLoaded = true;
+	/** Per-Run detector state and label; the configuration file stays shared. */
+	private runStatePath(): string | undefined {
+		const file = this.deps.watchdogPath;
+		if (!file || !this.runId) return undefined;
+		return join(dirname(file), `watchdog-${this.runId.replace(/[^A-Za-z0-9_-]/g, "_")}.json`);
+	}
+
+	/** Loads once per Run; concurrent callers share the same read. */
+	private loadWatchdog(): Promise<void> {
+		this.watchdogLoad ??= this.readWatchdog();
+		return this.watchdogLoad;
+	}
+
+	private async readWatchdog(): Promise<void> {
 		const file = this.deps.watchdogPath;
 		if (!file) return;
+		const runFile = this.runStatePath();
 		try {
 			const raw = JSON.parse(await readFile(file, "utf8")) as Record<string, unknown>;
 			this.watchdogConfig = normalizeWatchdogConfig(raw.config, this.watchdogConfig);
+		} catch {
+			/* first run or old/corrupt config: keep the defaults */
+		}
+		if (!runFile) return;
+		try {
+			const raw = JSON.parse(await readFile(runFile, "utf8")) as Record<string, unknown>;
 			if (Array.isArray(raw.resolvedRelease)) this.seedReleased(raw.resolvedRelease.filter((id): id is string => typeof id === "string"));
 			if (raw.runId === this.runId) {
 				this.watchdogState = parseWatchdogState(raw.state);
@@ -146,11 +166,11 @@ export class FleetWatch {
 	private async persistWatchdog(): Promise<void> {
 		const file = this.deps.watchdogPath;
 		if (!file) return;
+		const runFile = this.runStatePath();
 		try {
 			await mkdir(dirname(file), { recursive: true, mode: 0o700 });
-			const tmp = `${file}.tmp`;
-			await writeFile(tmp, JSON.stringify({ version: 1, runId: this.runId, label: this.label, config: this.watchdogConfig, state: this.watchdogState, lastScanAt: this.watchdogLastScan, resolvedRelease: [...this.resolvedRelease] }), { mode: 0o600 });
-			await rename(tmp, file);
+			await writeAtomic(file, { version: 1, config: this.watchdogConfig });
+			if (runFile) await writeAtomic(runFile, { version: 1, runId: this.runId, label: this.label, state: this.watchdogState, lastScanAt: this.watchdogLastScan, resolvedRelease: [...this.resolvedRelease] });
 		} catch {
 			/* state persistence is best-effort; detector still runs in memory */
 		}
@@ -159,16 +179,25 @@ export class FleetWatch {
 	/** Start (or retarget) watching a Run. A new Run starts a fresh baseline. */
 	watch(runId: string): void {
 		if (this.disposed || this.runId === runId) return;
+		// Back on the Run it watched before (bridge off/on, a fence): keep what was
+		// already reported instead of announcing every open worker again.
+		if (this.lastRunId === runId) {
+			this.runId = runId;
+			this.schedule(0);
+			this.resetActivityTimer();
+			return;
+		}
 		// Switching Runs: watches name dispatches of the previous Run and do not
 		// carry over. The first Run of a session keeps watches restored at start.
-		this.state = this.runId === null ? { ...initialFleet(), watches: this.state.watches } : initialFleet();
+		this.state = this.lastRunId === null ? { ...initialFleet(), watches: this.state.watches } : initialFleet();
+		this.lastRunId = runId;
 		this.runId = runId;
 		this.label = "";
 		this.details.clear();
 		this.activity.clear();
 		this.tails.clear();
 		this.watchdogState = initialWatchdogState();
-		this.watchdogLoaded = false;
+		this.watchdogLoad = undefined;
 		this.watchdogLastScan = Number.NEGATIVE_INFINITY;
 		if (this.pendingSeed?.runId === runId) {
 			this.state = seedSeen(this.state, this.pendingSeed.seen);
@@ -180,6 +209,11 @@ export class FleetWatch {
 			this.resetActivityTimer();
 			this.deps.onChange();
 		});
+	}
+
+	/** The release grace is the watchdog's, so orca_config {watchdog} controls both notices. */
+	private fleetConfig(): FleetConfig {
+		return { ...(this.deps.config ?? DEFAULT_FLEET_CONFIG), releaseGraceMs: this.watchdogConfig.releaseGraceMs };
 	}
 
 	stop(): void {
@@ -233,7 +267,7 @@ export class FleetWatch {
 			if (this.runId !== runId || this.disposed) return;
 			if (rows) {
 				const normalizedRows = rows.map((row) => this.resolvedRelease.has(row.dispatchId) ? { ...row, terminalState: "released", nextAction: "none" } : row);
-				const { state, events } = updateFleet(this.state, normalizedRows, tasks, this.deps.now(), this.deps.config ?? DEFAULT_FLEET_CONFIG);
+				const { state, events } = updateFleet(this.state, normalizedRows, tasks, this.deps.now(), this.fleetConfig());
 				this.state = state;
 				this.lastPollAt = this.deps.now();
 				// An incomplete inventory must not claim the fleet is idle.
@@ -318,7 +352,7 @@ export class FleetWatch {
 				}
 			}
 			if (this.runId !== runId || this.disposed) return;
-			const quiet = quietEvents(this.state, this.activity, this.deps.now(), this.deps.config ?? DEFAULT_FLEET_CONFIG);
+			const quiet = quietEvents(this.state, this.activity, this.deps.now(), this.fleetConfig());
 			if (quiet.length) this.deps.onEvents(quiet, this.state, runId);
 			if (this.deps.now() - this.watchdogLastScan >= this.watchdogConfig.cadenceMs) {
 				await this.scanWatchdog(runId, this.deps.now());
@@ -371,7 +405,7 @@ export class FleetWatch {
 				requiresInput: row.attention.includes("input"),
 				pendingQuestion: detail?.pendingQuestion || row.pendingQuestion,
 				questionOptions: detail?.questionOptions || row.questionOptions,
-				settledForMs: tracked.settledAt === null ? undefined : Math.max(0, now - tracked.settledAt),
+				settledForMs: tracked.settledAt === null || tracked.historic ? undefined : Math.max(0, now - tracked.settledAt),
 			});
 		}
 		const result = evaluateWatchdog(this.watchdogState, samples, now, this.watchdogConfig);
@@ -411,4 +445,13 @@ export class FleetWatch {
 		const result = resultOf(await runOrcaCli(this.deps.orcaBin, ["orchestration", "task-list", "--run", runId, "--json"], { cwd: this.deps.cwd, env: this.deps.env }));
 		return result ? parseTasks(result) : undefined;
 	}
+}
+
+let tmpSeq = 0;
+
+/** Write JSON through a unique temporary file, so concurrent writers never share one. */
+async function writeAtomic(file: string, value: unknown): Promise<void> {
+	const tmp = `${file}.${process.pid}.${++tmpSeq}.tmp`;
+	await writeFile(tmp, JSON.stringify(value), { mode: 0o600 });
+	await rename(tmp, file);
 }

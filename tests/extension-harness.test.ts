@@ -6,7 +6,7 @@
 import { test } from "node:test";
 import { readFileSync } from "node:fs";
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -36,6 +36,7 @@ function fakePi() {
 	const emitted: Array<{ channel: string; data: unknown }> = [];
 	const entries: Array<{ customType: string; data: unknown }> = [];
 	let activeTools: string[] = ["bash", "read"];
+	const statuses = new Map<string, string | undefined>();
 	const pi = {
 		registerTool: (tool: { name: string }) => tools.set(tool.name, tool as never),
 		on: (event: string, handler: Handler) => {
@@ -61,7 +62,7 @@ function fakePi() {
 		mode: "tui",
 		hasUI: false,
 		ui: {
-			setStatus: () => {},
+			setStatus: (key: string, text: string | undefined) => statuses.set(key, text),
 			setWidget: (key: string, factory: ((tui: unknown, theme: unknown) => Widget) | undefined) => {
 				if (factory) widgets.set(key, factory({ requestRender: () => {} }, { fg: (_c: string, t: string) => t }));
 				else widgets.delete(key);
@@ -77,7 +78,7 @@ function fakePi() {
 		for (const h of handlers.get(event) ?? []) last = await h(payload, ctx);
 		return last;
 	};
-	return { pi, ctx, tools, sent, userSent, state, commands, widgets, emitted, fire, active: () => activeTools };
+	return { pi, ctx, tools, sent, userSent, state, commands, widgets, emitted, statuses, fire, active: () => activeTools };
 }
 
 async function withEnv<T>(vars: Record<string, string | undefined>, fn: () => Promise<T>): Promise<T> {
@@ -220,17 +221,34 @@ test("coordinator in Orca: tools activate with the Run, deliveries inject, guard
 		const f = fakePi();
 		piBg(f.pi as never);
 		assert.ok(f.tools.has("orca_ack") && f.tools.has("orca_workers") && f.tools.has("orca_watch"));
-		for (const name of ["orca_release", "orca_screen", "orca_label", "orca_watchdog"]) assert.ok(f.tools.has(name), `${name} should be available in the coordinator`);
+		for (const name of ["orca_release", "orca_screen", "orca_config"]) assert.ok(f.tools.has(name), `${name} should be available in the coordinator`);
+		for (const name of ["orca_inbox", "orca_label", "orca_watchdog"]) assert.ok(!f.tools.has(name), `${name} was merged into orca_workers / orca_config`);
 		await f.fire("session_start");
 		await until(() => f.sent.some((s) => s.message.customType === "pi-bg-orca"));
 		const delivery = f.sent.find((s) => s.message.customType === "pi-bg-orca")!;
 		assert.match(delivery.message.content, /Orca delivery d1/);
 		assert.deepEqual(delivery.options, { deliverAs: "steer", triggerTurn: true });
 		assert.ok(f.active().includes("orca_ack"), "coordinator tools active while the Run is bound");
+		const inbox = await f.tools.get("orca_workers")!.execute("i", { inbox: true }, undefined, undefined, f.ctx);
+		assert.match(inbox.content[0].text ?? "", /bridge: pending .*run run_fake/);
+		assert.match(inbox.content[0].text ?? "", /Orca delivery d1/);
 		const blocked = (await f.fire("tool_call", { toolName: "bash", input: { command: "orca orchestration check --json" } })) as { block?: boolean };
 		assert.equal(blocked?.block, true);
 		const peek = await f.fire("tool_call", { toolName: "bash", input: { command: "orca orchestration check --peek --json" } });
 		assert.equal(peek, undefined);
+		// A typo is not a Run id: the waiter and the pending delivery stay.
+		const notes: string[] = [];
+		const cmdCtx = { ...f.ctx, ui: { ...f.ctx.ui, notify: (text: string) => notes.push(text) } };
+		await f.commands.get("orca-watch")!.handler("stauts", cmdCtx);
+		assert.match(notes.at(-1) ?? "", /usage/i);
+		await f.commands.get("orca-watch")!.handler("STATUS", cmdCtx);
+		assert.match(notes.at(-1) ?? "", /orca bridge: pending .*pending d1/);
+		// An unknown dispatch id is refused, not silently watched forever.
+		await until(() => readFileSync(join(dir, "calls.log"), "utf8").includes("worker-list"));
+		await assert.rejects(f.tools.get("orca_watch")!.execute("w", { dispatchId: "ctx_nope" }, undefined, undefined, f.ctx), /ctx_nope is not in the bound Run/);
+		// Without a deliveryId, orca_ack acknowledges the pending delivery.
+		const acked = await f.tools.get("orca_ack")!.execute("a", {}, undefined, undefined, f.ctx);
+		assert.match(acked.content[0].text ?? "", /d1/);
 		await f.tools.get("bg_run")!.execute("t2", { command: "sleep 0.2", timeout_s: 60 }, undefined, undefined, f.ctx);
 		await until(() => f.emitted.some((e) => e.channel === "subagent:async-complete"));
 		assert.equal(f.emitted[0].channel, "subagent:async-started");
@@ -358,7 +376,7 @@ test("worker mail: a coordinator message detaches the running command and reache
 		// The call ended detached: the command keeps running.
 		await f.fire("tool_execution_end", { toolCallId: "c1", toolName: "bash", result: {}, isError: false });
 		const status = await f.tools.get("bg_status")!.execute("s", {}, undefined, undefined, f.ctx);
-		assert.match(status.content[0].text ?? "", /bg1.*running/);
+		assert.match(status.content[0].text ?? "", /bg1 running .*deadline 30m00s/, "a detached command without a bash timeout gets the 30 min default");
 		await f.fire("session_shutdown");
 	});
 });
@@ -391,7 +409,7 @@ test("any interactive session: a bash command still running after the threshold 
 		// Fast commands and orca lifecycle calls are left alone; others run attached.
 		const quick = { toolName: "bash", toolCallId: "q", input: { command: "echo hi" } };
 		await f.fire("tool_call", quick);
-		assert.match(quick.input.command, /attach-client/);
+		assert.match(quick.input.command, /^# pi-bg bg1 \(moves to the background after 1s\): echo hi\n.*attach-client/s, "no coordinator outside an Orca worker");
 		const slow = { toolName: "bash", toolCallId: "s", input: { command: "sleep 3; echo done", timeout: 20 } };
 		await f.fire("tool_call", slow);
 		const child = spawn("bash", ["-c", slow.input.command.split("\n").slice(1).join("\n")]);
@@ -424,7 +442,7 @@ test("gentle subagent children and non-interactive sessions never auto-backgroun
 	}
 });
 
-test("worker attach: a bash call without a timeout gets 30 s, one with a timeout keeps it even in the background", async () => {
+test("worker attach: a bash call without a timeout has no deadline until it moves to the background (then 30 min); one with a timeout keeps it", async () => {
 	const state = await mkdtemp(join(tmpdir(), "pi-bg-state-"));
 	const dir = await fakeOrcaDir(null);
 	await withEnv({ ORCA_TERMINAL_HANDLE: "term_worker", GENTLE_PI_AGENTS_CHILD: undefined, PI_BG_STATE_DIR: state, PI_BG_ORCA_BIN: FAKE, FAKE_ORCA_DIR: dir }, async () => {
@@ -435,7 +453,8 @@ test("worker attach: a bash call without a timeout gets 30 s, one with a timeout
 		await f.fire("tool_call", { toolName: "bash", toolCallId: "c1", input: { command: "sleep 60" } });
 		await f.fire("tool_call", { toolName: "bash", toolCallId: "c2", input: { command: "sleep 60", timeout: 1 } });
 		const status = (await f.tools.get("bg_status")!.execute("s", {}, undefined, undefined, f.ctx)).content[0].text ?? "";
-		assert.match(status, /bg1 running .*deadline 30s/);
+		assert.match(status, /bg1 running/);
+		assert.doesNotMatch(status, /bg1 running .*deadline/, "no deadline while attached, like Pi's bash");
 		assert.match(status, /bg2 running .*deadline 1s/);
 		await sleep(1600);
 		const after = (await f.tools.get("bg_status")!.execute("s", { id: "bg2" }, undefined, undefined, f.ctx)).content[0].text ?? "";
@@ -496,14 +515,81 @@ test("orca_release uses native release then closes only a freshly exited termina
 		assert.match(calls, /terminal close --terminal term_ctx_release --json/);
 		const fleet = await f.tools.get("orca_workers")!.execute("w", { refresh: true }, undefined, undefined, f.ctx);
 		assert.doesNotMatch(fleet.content[0].text ?? "", /to release/);
-		await f.tools.get("orca_label")!.execute("l", { label: "Current run focus" }, undefined, undefined, f.ctx);
-		await f.tools.get("orca_watchdog")!.execute("d", { enabled: false, cadenceMinutes: 3, scopeGlobs: ["src/**"] }, undefined, undefined, f.ctx);
+		const set = await f.tools.get("orca_config")!.execute("c", { label: "Current run focus", watchdog: { enabled: false, cadenceMinutes: 3, scopeGlobs: ["src/**"] } }, undefined, undefined, f.ctx);
+		assert.match(set.content[0].text ?? "", /label set to: Current run focus/);
+		assert.match(set.content[0].text ?? "", /Watchdog disabled/);
+		await assert.rejects(f.tools.get("orca_config")!.execute("c", {}, undefined, undefined, f.ctx), /label or watchdog/);
 		const saved = JSON.parse(await readFile(join(state, "orca", "watchdog.json"), "utf8"));
-		assert.equal(saved.label, "Current run focus");
 		assert.equal(saved.config.enabled, false);
 		assert.equal(saved.config.cadenceMs, 3 * 60_000);
 		assert.deepEqual(saved.config.scopeGlobs, ["src/**"]);
-		assert.deepEqual(saved.resolvedRelease, ["ctx_release"]);
+		const run = JSON.parse(await readFile(join(state, "orca", "watchdog-run_fake.json"), "utf8"));
+		assert.equal(run.label, "Current run focus");
+		assert.deepEqual(run.resolvedRelease, ["ctx_release"]);
+		await f.fire("session_shutdown");
+	});
+});
+
+test("the delegation guide joins the system prompt only in an Orca session, never in a Gentle child", async () => {
+	for (const [handle, child, expected] of [["term_coord", undefined, true], [undefined, undefined, false], ["term_coord", "1", false]] as const) {
+		const state = await mkdtemp(join(tmpdir(), "pi-bg-state-"));
+		const dir = await fakeOrcaDir("run_fake");
+		await withEnv({ ORCA_TERMINAL_HANDLE: handle, GENTLE_PI_AGENTS_CHILD: child, PI_BG_STATE_DIR: state, PI_BG_ORCA_BIN: FAKE, FAKE_ORCA_DIR: dir }, async () => {
+			const f = fakePi();
+			piBg(f.pi as never);
+			await f.fire("session_start");
+			const result = (await f.fire("before_agent_start", { systemPrompt: "BASE" })) as { systemPrompt?: string } | undefined;
+			if (expected) {
+				assert.match(result?.systemPrompt ?? "", /^BASE\n\n.*Orca worker/s);
+			} else {
+				assert.equal(result?.systemPrompt, undefined, `handle=${handle} child=${child}`);
+			}
+			await f.fire("session_shutdown");
+		});
+	}
+});
+
+test("Orca tools stay off in a non-interactive session, where no bridge runs", async () => {
+	const state = await mkdtemp(join(tmpdir(), "pi-bg-state-"));
+	const dir = await fakeOrcaDir("run_fake");
+	await withEnv({ ORCA_TERMINAL_HANDLE: "term_print", GENTLE_PI_AGENTS_CHILD: undefined, PI_BG_STATE_DIR: state, PI_BG_ORCA_BIN: FAKE, FAKE_ORCA_DIR: dir }, async () => {
+		const f = fakePi();
+		(f.ctx as { mode: string }).mode = "print";
+		piBg(f.pi as never);
+		await f.fire("session_start");
+		assert.ok(!f.active().some((name) => name.startsWith("orca_")), f.active().join(","));
+		await f.fire("session_shutdown");
+	});
+});
+
+test("Orca tools come back if another extension drops them from the active list", async () => {
+	const state = await mkdtemp(join(tmpdir(), "pi-bg-state-"));
+	const dir = await fakeOrcaDir("run_fake");
+	await withEnv({ ORCA_TERMINAL_HANDLE: "term_coord", GENTLE_PI_AGENTS_CHILD: undefined, PI_BG_STATE_DIR: state, PI_BG_ORCA_BIN: FAKE, FAKE_ORCA_DIR: dir }, async () => {
+		const f = fakePi();
+		piBg(f.pi as never);
+		await f.fire("session_start");
+		await until(() => f.active().includes("orca_ack"));
+		f.pi.setActiveTools(["bash", "read"]);
+		await f.tools.get("bg_run")!.execute("t", { command: "true", timeout_s: 10 }, undefined, undefined, f.ctx);
+		await until(() => f.active().includes("orca_ack"), 4_000);
+		await f.fire("session_shutdown");
+	});
+});
+
+test("a worker whose mail peek fails sees it in the status line, without a wake", async () => {
+	const state = await mkdtemp(join(tmpdir(), "pi-bg-state-"));
+	const dir = await fakeOrcaDir(null);
+	await writeFile(join(dir, "peek-fail"), "");
+	await withEnv({ ORCA_TERMINAL_HANDLE: "term_worker", GENTLE_PI_AGENTS_CHILD: undefined, PI_BG_STATE_DIR: state, PI_BG_ORCA_BIN: FAKE, FAKE_ORCA_DIR: dir }, async () => {
+		const f = fakePi();
+		(f.ctx as { hasUI: boolean }).hasUI = true;
+		piBg(f.pi as never);
+		await f.fire("session_start");
+		await f.fire("input", { text: "orca orchestration send --from term_worker --task-id task_abc --dispatch-id ctx_abc\n=== TASK ===\nDo X" });
+		await until(() => [...f.statuses.values()].some((v) => /correo ilegible/.test(v ?? "")), 6_000);
+		assert.ok(!f.sent.some((s) => s.message.customType === "pi-bg-worker-mail"), "no wake for a failed peek");
+		await rm(join(dir, "peek-fail"));
 		await f.fire("session_shutdown");
 	});
 });

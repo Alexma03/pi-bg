@@ -275,6 +275,8 @@ interface Tracked {
 	/** When the current activity value was first seen (or observedAt). */
 	activitySince: number;
 	settledAt: number | null;
+	/** Already settled when watching started: history, not closure debt to report. */
+	historic?: boolean;
 	/** Condition keys already notified, so each episode is reported once. */
 	notified: Set<string>;
 }
@@ -347,6 +349,7 @@ export function updateFleet(prev: FleetState, rows: WorkerRow[], tasks: TaskRow[
 			row,
 			activitySince: activityStart(old, row, now),
 			settledAt: old?.settledAt ?? null,
+			...(old ? (old.historic ? { historic: true } : {}) : !prev.primed && !isInProgress(row) ? { historic: true } : {}),
 			notified: new Set([...(old?.notified ?? []), ...(old ? [] : (prev.seen.get(row.dispatchId) ?? []))]),
 		};
 		state.workers.set(row.dispatchId, tracked);
@@ -354,7 +357,10 @@ export function updateFleet(prev: FleetState, rows: WorkerRow[], tasks: TaskRow[
 		const age = now - tracked.activitySince;
 
 		if (!active && tracked.settledAt === null) tracked.settledAt = now;
-		if (active) tracked.settledAt = null;
+		if (active) {
+			tracked.settledAt = null;
+			delete tracked.historic;
+		}
 
 		if (active && !humanOwned(row)) {
 			if (STALL_ACTIVITIES.has(row.activity) && age >= config.stallMs) {
@@ -381,7 +387,7 @@ export function updateFleet(prev: FleetState, rows: WorkerRow[], tasks: TaskRow[
 			push(tracked, "settled", `settled:${row.outcome}`, { detail: row.outcome });
 		}
 		// A terminal a human took over is theirs, not closure debt.
-		if (row.nextAction === "release" && !humanOwned(row) && tracked.settledAt !== null && now - tracked.settledAt >= config.releaseGraceMs) {
+		if (row.nextAction === "release" && !humanOwned(row) && !tracked.historic && tracked.settledAt !== null && now - tracked.settledAt >= config.releaseGraceMs) {
 			push(tracked, "release", "release", { detail: "settled but its terminal is not released" });
 		}
 	}

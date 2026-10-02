@@ -269,7 +269,7 @@ function onWaitResult(state: OrcaState, outcome: CheckOutcome, sentAck: string |
 
 function onAckResult(state: OrcaState, outcome: CheckOutcome, deliveryId: string, now: number, random: () => number): StepResult {
 	if (state.phase !== "acking" || !state.pending || state.pending.id !== deliveryId) {
-		return reply(state, false, "The bridge state changed while acknowledging; see orca_inbox.");
+		return reply(state, false, "The bridge state changed while acknowledging; see orca_workers {inbox: true}.");
 	}
 	const restore: OrcaState = { ...state, phase: "pending", reason: "pending ack" };
 	switch (outcome.kind) {

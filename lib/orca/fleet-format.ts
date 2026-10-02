@@ -1,6 +1,7 @@
 // Model-facing text for fleet notices and the orca_workers table. Pure.
 
 import { clip, formatDuration, sanitizeTerminal } from "../text.ts";
+import { nextWakeAt, takeWake, type WakeBudget } from "../wake-budget.ts";
 import { redact } from "../redact.ts";
 import { formatModel, resolveWorkerModel } from "./model.ts";
 import type { ActivitySeen } from "./activity.ts";
@@ -46,7 +47,9 @@ export function fleetEventLine(e: FleetEvent): string {
 	const who = e.dispatchId ? `${clip(clean(e.title ?? e.dispatchId), 60)} (${e.dispatchId})` : "fleet";
 	const since = e.sinceMs !== undefined ? ` for ${formatDuration(e.sinceMs)}` : "";
 	const detail = e.detail ? `: ${clean(e.detail)}` : "";
-	const notes = e.notes?.length ? `\n    your note: ${e.notes.map((n) => clip(clean(n), 300)).join(" | ")}` : "";
+	// A settled notice follows the worker_done delivery, which may already have been handled.
+	const skip = e.kind === "settled" ? " (skip it if you already acted on this worker's worker_done delivery)" : "";
+	const notes = e.notes?.length ? `\n    your note: ${e.notes.map((n) => clip(clean(n), 300)).join(" | ")}${skip}` : "";
 	return `- ${LABEL[e.kind] ?? e.kind} ${who}${since}${detail}${notes}`;
 }
 
@@ -57,9 +60,111 @@ export function shouldWake(events: FleetEvent[]): boolean {
 	return events.some((e) => WAKE_KINDS.has(e.kind) || (e.notes?.length ?? 0) > 0);
 }
 
-/** New watchdog findings bypass the ordinary fleet notice wake budget. */
+/** New watchdog findings, an exited worker and attention bypass the ordinary fleet notice wake budget. */
 export function mustWake(events: FleetEvent[]): boolean {
-	return events.some((event) => ["scope", "stall", "loop", "prompt", "finished"].includes(event.kind));
+	return events.some((event) => ["scope", "stall", "loop", "prompt", "finished", "exited", "attention"].includes(event.kind));
+}
+
+/** Detectors that describe the same worker condition, most specific first. */
+const CONDITIONS: Array<{ group: string; kinds: FleetEvent["kind"][] }> = [
+	{ group: "question", kinds: ["prompt", "attention", "blocked"] },
+	{ group: "closure", kinds: ["finished", "release"] },
+	{ group: "stuck", kinds: ["stall", "stalled", "quiet"] },
+];
+
+function conditionOf(e: FleetEvent): { group: string; rank: number } | undefined {
+	// Attention is an open question only when it asks for input.
+	if (e.kind === "attention" && !/input/.test(e.detail ?? "")) return undefined;
+	for (const c of CONDITIONS) {
+		const rank = c.kinds.indexOf(e.kind);
+		if (rank >= 0) return { group: c.group, rank };
+	}
+	return undefined;
+}
+
+/**
+ * One notice per worker condition. Within a batch the most specific detector
+ * wins and inherits the others' notes; a condition reported for a worker in the
+ * last `windowMs` is not reported again unless it carries a watch note. Fleet
+ * idle is dropped when every open worker already has its own notice.
+ * Reads `memory` (`dispatchId|group` -> time) without changing it: only a
+ * delivered notice counts as reported (see rememberFleetEvents).
+ */
+export function dedupeFleetEvents(events: FleetEvent[], memory: Map<string, number>, now: number, openIds: string[], windowMs = 10 * 60_000): FleetEvent[] {
+	const kept: FleetEvent[] = [];
+	const best = new Map<string, { event: FleetEvent; rank: number; notes: string[] }>();
+	for (const e of events) {
+		const c = e.dispatchId ? conditionOf(e) : undefined;
+		if (!c) {
+			kept.push(e);
+			continue;
+		}
+		const slot = `${e.dispatchId}|${c.group}`;
+		const cur = best.get(slot);
+		const notes = [...(cur?.notes ?? []), ...(e.notes ?? [])];
+		if (!cur || c.rank < cur.rank) best.set(slot, { event: e, rank: c.rank, notes });
+		else cur.notes = notes;
+	}
+	for (const [slot, { event, notes }] of best) {
+		const last = memory.get(slot);
+		if (last !== undefined && now - last < windowMs && notes.length === 0) continue;
+		kept.push(notes.length ? { ...event, notes: [...new Set(notes)] } : event);
+	}
+	const covered = new Set(kept.filter((e) => e.dispatchId).map((e) => e.dispatchId));
+	return kept.filter((e) => e.kind !== "fleet_idle" || openIds.length === 0 || !openIds.every((id) => covered.has(id)));
+}
+
+/** Record delivered notices, so the same worker condition is not reported again soon. */
+export function rememberFleetEvents(events: FleetEvent[], memory: Map<string, number>, now: number): void {
+	for (const e of events) {
+		const c = e.dispatchId ? conditionOf(e) : undefined;
+		if (c) memory.set(`${e.dispatchId}|${c.group}`, now);
+	}
+}
+
+export interface FleetFlushInput {
+	/** Notices held earlier because the wake budget was spent; not yet delivered. */
+	held: FleetEvent[];
+	fresh: FleetEvent[];
+	memory: Map<string, number>;
+	budget: WakeBudget;
+	now: number;
+	openIds: string[];
+}
+
+export interface FleetFlushPlan {
+	/** Deliver these now (empty when everything is held). */
+	send: FleetEvent[];
+	/** Whether the delivery starts a turn. */
+	trigger: boolean;
+	held: FleetEvent[];
+	budget: WakeBudget;
+	/** When to flush again for held notices. */
+	retryAt?: number;
+}
+
+/**
+ * Decide one fleet flush. Held and fresh notices are deduplicated together, so
+ * a more specific fresh notice (a prompt) replaces a held one (blocked) and its
+ * mandatory wake is not delayed. Only what is sent is remembered.
+ */
+export function planFleetFlush(input: FleetFlushInput): FleetFlushPlan {
+	const { memory, now } = input;
+	const events = dedupeFleetEvents([...input.held, ...input.fresh], memory, now, input.openIds);
+	if (events.length === 0) return { send: [], trigger: false, held: [], budget: input.budget };
+	let budget = input.budget;
+	let trigger = false;
+	if (shouldWake(events)) {
+		if (mustWake(events)) trigger = true;
+		else {
+			const taken = takeWake(budget, now);
+			budget = taken.budget;
+			if (!taken.allowed) return { send: [], trigger: false, held: events, budget, retryAt: nextWakeAt(budget, now) };
+			trigger = true;
+		}
+	}
+	rememberFleetEvents(events, memory, now);
+	return { send: events, trigger, held: [], budget };
 }
 
 export function formatFleetNotice(events: FleetEvent[], state: FleetState, runId: string, now: number): string {

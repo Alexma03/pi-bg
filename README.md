@@ -17,9 +17,9 @@ Restart or `/reload` running sessions to pick it up.
 
 ## Background tasks
 
-**Automatic background.** In an interactive session, a `bash` command still running after **10 s** moves to the background by itself. The bash call returns at once saying so, the command keeps running as a pi-bg task, and its ordinary notice arrives when it ends. Its bash `timeout` (or 30 s without one) still applies. Measured before this change: agents spent 348 min in 4 h blocked in bash calls (CI polling loops, deploys), while Orca deliveries waited. Orca lifecycle commands (`orca …`) stay in the foreground. Gentle subagent children and non-interactive runs are left alone. `PI_BG_AUTO_BACKGROUND_S` changes the threshold (`0` turns it off), and `PI_BG_ATTACH=0` turns attaching off entirely.
+**Automatic background.** In an interactive session, a `bash` command still running after **10 s** moves to the background by itself. The bash call returns at once saying so, the command keeps running as a pi-bg task, and its ordinary notice arrives when it ends. Its bash `timeout` still applies. Without one, the command has no deadline in the foreground (as with Pi's `bash`) and gets a 30 min deadline once it moves to the background. Measured before this change: agents spent 348 min in 4 h blocked in bash calls (CI polling loops, deploys), while Orca deliveries waited. Orca lifecycle commands (`orca …`) stay in the foreground. Gentle subagent children and non-interactive runs are left alone. `PI_BG_AUTO_BACKGROUND_S` changes the threshold (`0` turns it off), and `PI_BG_ATTACH=0` turns attaching off entirely.
 
-`bg_run` is for commands that take **10 seconds or more**, or never end on their own (test suites, builds, installs, deploys, CI and log watches). It is also for starting **several such commands in parallel**, one `bg_run` each. Near-instant commands (`cd`, `cat`, `ls`, `grep`, `git status`…) belong to the ordinary `bash` tool. The tool description tells the model this. When a task still ends in under 2 s, its notice reminds the model to use `bash` for commands that fast.
+`bg_run` is for commands that take **10 seconds or more**, or never end on their own (test suites, builds, installs, deploys, CI and log watches). It is also for starting **several such commands in parallel**, one `bg_run` each. Near-instant commands (`cd`, `cat`, `ls`, `grep`, `git status`…) belong to the ordinary `bash` tool. The tool description tells the model this on its own, so hosts that drop `promptGuidelines` still get the whole rule; waiting (CI, deploys, polling loops) counts as slow. When a task still ends in under 2 s, its notice reminds the model to use `bash` for commands that fast.
 
 | Tool | What it does |
 | --- | --- |
@@ -44,20 +44,31 @@ Restart or `/reload` running sessions to pick it up.
 - **Logs.** Logs live in `~/.local/state/pi-bg/logs/<session>/` (mode 0600) and are pruned after 7 days. Anything copied from a log to the model or the terminal is stripped of escape sequences, redacted for common credential shapes, and size-bounded.
 - **Commands.** `/bg` lists tasks. `/bg kill <id|all>` stops them.
 
+## Delegation guide
+
+In an interactive Pi session inside an Orca terminal (not a Gentle subagent child), pi-bg appends a short guide to the system prompt on every turn. It names the layer to pick:
+
+- **`bg_run`**: a shell command with no reasoning.
+- **Gentle subagent**: a bounded unit on one front that returns its result to the conversation, in this or another worktree of the same clone.
+- **Orca worker**: delegated work that itself needs orchestration (several fronts, its own plan and subagents, long autonomy, parallel writers in separate worktrees). It is a new Pi session that orchestrates that work.
+- **`orca-cli` handoff**: work given away with no supervision.
+
+A dispatched worker is reminded that it still orchestrates its own task with Gentle subagents and `bg_run`. Outside Orca nothing is added. The guide lives in the system prompt, not in tool guidelines, because the choice is made before any tool is called and some hosts forward only tool descriptions.
+
 ## Orca mailbox bridge
 
 The bridge is active only in an interactive Pi session inside an Orca terminal (`ORCA_TERMINAL_HANDLE` is set), and never in gentle subagent children. It works as follows.
 
-The coordinator tools (`orca_ack`, `orca_inbox`, `orca_workers`, `orca_watch`, `orca_release`, `orca_screen`, `orca_label`, `orca_watchdog`) are active in such a session from the start, even before a Run is bound. Some providers, such as claude-bridge, fix the tool list for a whole turn. Without this, a delivery that arrives in the same turn as `run-create` could not be acknowledged until the next turn. Without a Run the tools only answer that nothing is bound.
+The coordinator tools (`orca_ack`, `orca_workers`, `orca_watch`, `orca_release`, `orca_screen`, `orca_config`) are active in such a session from the start, even before a Run is bound. Some providers, such as claude-bridge, fix the tool list for a whole turn. Without this, a delivery that arrives in the same turn as `run-create` could not be acknowledged until the next turn. Without a Run the tools only answer that nothing is bound.
 
 1. **Detect.** At session start, and again after any bash `orca orchestration run-create|run-use`, the bridge runs `orca orchestration run-current`. While no Run is bound it re-checks every 2 minutes.
 2. **Wait.** It keeps exactly one `orca orchestration check --wait --json` child, **without `--types`**. Orca 1.4.212 does not type its "You have N orchestration messages" pointer while an unfiltered waiter exists, or while a delivery is outstanding. Both states are covered, so the pointer never appears.
 3. **Heartbeats.** A heartbeat-only batch is acknowledged silently: the next wait runs as `check --ack <id> --wait`.
-4. **Deliver.** Any other batch becomes an **Orca delivery** message (steer + triggerTurn).
+4. **Deliver.** Any other batch becomes an **Orca delivery** message, delivered like a task notice (steer while busy; next turn plus a wake prompt while idle).
    - It carries the delivery id, the Run, and every non-heartbeat message with its type, sender, subject, body, payload and a reply hint.
    - The full batch is saved as JSON under `~/.local/state/pi-bg/orca/`.
    - The delivery stays *pending*; no new wait starts until it is acknowledged.
-5. **Ack.** After processing every message, the model calls **`orca_ack {deliveryId}`**.
+5. **Ack.** After processing every message, the model calls **`orca_ack`** (`deliveryId` defaults to the pending delivery).
    - The bridge runs a synchronous `check --ack`. If Orca already holds the next batch, it is returned inline in the tool result.
    - Otherwise the waiter is re-armed.
    - A single reminder is sent if a delivery stays pending for more than 10 minutes.
@@ -71,7 +82,7 @@ The coordinator tools (`orca_ack`, `orca_inbox`, `orca_workers`, `orca_watch`, `
    | `consumer_fenced`, `stable_pane_required`… | Stop, then re-detect the Run. |
    | Replayed delivery (after a failed ack or a `/reload`) | Re-injected with a visible **REPLAY** note. |
 
-- **Inspect.** `orca_inbox` shows the bridge state and the pending delivery, read-only.
+- **Inspect.** `orca_workers {inbox: true}` shows the bridge state and the pending delivery, read-only.
 - **Commands.**
   - `/orca-watch` shows the status.
   - `/orca-watch on` and `/orca-watch off` switch the bridge.
@@ -83,7 +94,7 @@ The footer shows `⏵ 2 tareas` for tasks and a separate Orca segment. The Orca 
 
 While a Run is bound, pi-bg polls `worker-list --run` and `task-list --run` every 30 s. These calls are read-only, use explicit paging, and never touch the mailbox. Terminal snapshots and the native watchdog run every 2 minutes by default (configurable); they make no model calls. The watchdog checks Git changes since `merge-base origin/main` against the Task's `Allowed edit surfaces` section (or configured `scopeGlobs`), unchanged working screens, repeated waiting loops, local approval/picker prompts, Orca asks and idle plain-text questions, and finished workers awaiting release. Git includes committed, staged, unstaged and untracked paths. The watchdog never writes to worker repos or acts on findings.
 
-Only new findings wake the coordinator; watchdog findings bypass the ordinary fleet wake budget, active findings are deduplicated, and cleared/reopened findings have a cooldown. Its configuration and detector state live under `PI_BG_STATE_DIR/orca/watchdog.json`. Recent heartbeat/status timestamps count as activity even when a long-running worker's screen is unchanged. Notices contain question text and visible options where available, so the coordinator can decide how to answer.
+Only new findings wake the coordinator; watchdog findings bypass the ordinary fleet wake budget, active findings are deduplicated, and cleared/reopened findings have a cooldown. Its configuration lives in `PI_BG_STATE_DIR/orca/watchdog.json`; detector state, label and released workers live per Run in `orca/watchdog-<runId>.json`, so coordinators on different Runs never overwrite each other. Recent heartbeat/status timestamps count as activity even when a long-running worker's screen is unchanged. Notices contain question text and visible options where available, so the coordinator can decide how to answer.
 
 pi-bg also sends an **Orca fleet** message on these existing transitions:
 
@@ -96,14 +107,14 @@ pi-bg also sends an **Orca fleet** message on these existing transitions:
 - **fleet idle**: nobody is working while work is open;
 - **ready tasks**: tasks whose dependencies are done have no worker.
 
-Notices are coalesced over 5 s. At most 4 notices per 10 min start a turn; the rest wait for the next turn. Terminals taken over by a human are not reported as stalled or as closure debt. **The model decides what to do; pi-bg never nudges workers.**
+Notices are coalesced over 5 s, with one notice per worker condition (for example a prompt, not also blocked and attention). At most 4 notices per 10 min start a turn; beyond that they are held and sent when a slot frees. Watchdog findings, exited workers and attention always wake. Terminals taken over by a human are not reported as stalled or as closure debt. **The model decides what to do; pi-bg never nudges workers.**
 
-- `orca_workers {all?, refresh?}` shows the fleet table: outcome, activity, agent and model, time since dispatch, and a `now:` line with what each open worker is doing and how long that has been unchanged.
+- `orca_workers {all?, refresh?, inbox?}` shows the fleet table (with `inbox`, the bridge state and pending delivery first): outcome, activity, agent and model, time since dispatch, and a `now:` line with what each open worker is doing and how long that has been unchanged.
 - `orca_watch {dispatchId, on?, note?}` adds events (`settled`, `any`) plus a note that comes back verbatim in the notice. Notes survive `/reload`.
-- `orca_watchdog {enabled?, cadenceMinutes?, stallMinutes?, loopMinutes?, waitRepeatCount?, cooldownMinutes?, releaseGraceMinutes?, scopeGlobs?}` configures or disables model-free checks. `scopeGlobs: []` uses the Task spec's allowed surfaces.
+- `orca_config {label?, watchdog?: {enabled?, cadenceMinutes?, stallMinutes?, loopMinutes?, waitRepeatCount?, cooldownMinutes?, releaseGraceMinutes?, scopeGlobs?}}` sets the Run-card label and/or configures or disables model-free checks. `scopeGlobs: []` uses the Task spec's allowed surfaces.
 - `orca_screen {dispatchId, lines?}` reads a bounded screen tail with spinner/footer noise removed; picker questions and options remain visible.
 - `orca_release {dispatchId}` releases one explicitly selected settled worker; `orca_release {all:true}` handles all reclaimable settled workers. It uses Orca's native release first and closes an exact terminal only after fresh positive `exited` evidence.
-- `orca_label {label}` sets a short current-focus Run-card label that survives reload; without one, the card uses current worker Task titles rather than the stale Run-creation objective.
+- `orca_config {label}` sets a short current-focus Run-card label that survives reload; without one, the card uses current worker Task titles rather than the stale Run-creation objective.
 
 Model display uses explicit launch model/thinking options, then the worker's visible Pi status bar, then the Pi project/personal profile default (marked `(por defecto)`). It never copies the coordinator's current model.
 
@@ -138,7 +149,7 @@ A dispatched worker loses the coordinator tools as soon as its preamble arrives,
   - **"⏵ Segundo plano"** lists background work only: `bg_run` tasks, plus a worker's bash command once it has moved to the background. A command the agent is still waiting on does not appear, and neither does an internal `bgN` id. The time comes first, so a long command never hides it:
     - `⏵ 3m21s de 30m00s · infra verify.sh · ok 12/40`: running for 3m21s of its 30-minute deadline, then its label or command (clipped) and its last output line;
     - `✔ terminó bien · 20s · prueba idle`: finished ones lead with a plain outcome ("terminó bien", "falló (código 7)", "encontró el patrón", "tiempo agotado"…).
-  - **"⇄ Orca · <current focus>"** uses a short `orca_label` override or current worker Task titles (not the stale Run creation objective) and shows one entry per open agent.
+  - **"⇄ Orca · <current focus>"** uses a short `orca_config {label}` override or current worker Task titles (not the stale Run creation objective) and shows one entry per open agent.
     - First line: `agente ·`, the task title, its state ("trabajando", "esperando", "parado 5m sin terminar", "esperando una respuesta en su terminal", "terminó · falta cerrarlo"), the time since dispatch, the agent and provider/model plus thinking level. Evidence order is explicit launch options, the worker's visible Pi status bar, then project/personal profile default (marked "(por defecto)"). A reused terminal gets no guessed profile default.
     - Second line, dimmed (`↳`): what the worker is doing now, refreshed every 2 min from the tail of its terminal (`worker-read`, sanitized and redacted). It shows a background task it is waiting on, else its last tool action (`$ command`, `read file`, `bg_run · …`), else the last line it wrote. A tool call whose arguments are still being written (`write ...`, `$ ...`) is described in words, followed by what the agent said just before: `escribiendo un fichero · Writing the report now.`
     - Agent, launch model and start time come from `worker-show`; visible model/thinking is parsed from the worker's terminal status bar. These reads are read-only; launch details are cached.

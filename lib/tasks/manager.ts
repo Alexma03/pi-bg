@@ -167,7 +167,6 @@ export class TaskManager {
 				watchEvents: 0,
 				outputOffset: Buffer.byteLength(header),
 				...(spec.attached ? { attached: true } : {}),
-				...(spec.timeoutMs && spec.timeoutMs > 0 ? { timeoutMs: spec.timeoutMs } : {}),
 			},
 			child,
 			log,
@@ -188,15 +187,19 @@ export class TaskManager {
 		child.stderr?.on("data", (chunk: string) => this.onOutput(task, chunk));
 		child.on("error", (error) => this.onSpawnError(task, error));
 		child.on("close", (code, signal) => this.onClose(task, code, signal));
-		if (spec.timeoutMs && spec.timeoutMs > 0) {
-			this.timer(task, spec.timeoutMs, () => {
-				if (task.done) return;
-				task.timedOut = true;
-				terminateGroup(task.snap.pid, this.deps.killGraceMs ?? 3_000, () => task.done);
-			});
-		}
+		if (spec.timeoutMs && spec.timeoutMs > 0) this.deadline(task, spec.timeoutMs);
 		this.changed();
 		return { ...task.snap };
+	}
+
+	/** Stop the group `ms` after the task started. */
+	private deadline(task: Task, ms: number): void {
+		task.snap.timeoutMs = ms;
+		this.timer(task, Math.max(1, task.snap.startedAt + ms - this.deps.now()), () => {
+			if (task.done) return;
+			task.timedOut = true;
+			terminateGroup(task.snap.pid, this.deps.killGraceMs ?? 3_000, () => task.done);
+		});
 	}
 
 	private timer(task: Task, ms: number, fn: () => void): void {
@@ -344,12 +347,14 @@ export class TaskManager {
 
 	/**
 	 * Let an attached task keep running in the background: its attach client
-	 * returns now, and the ordinary exit notice follows when it ends.
+	 * returns now, and the ordinary exit notice follows when it ends. A task
+	 * without a deadline gets `defaultTimeoutMs`, counted from its start.
 	 */
-	detach(id: string, reason: "mail" | "slow" = "mail", afterMs?: number): TaskSnapshot | undefined {
+	detach(id: string, reason: "mail" | "slow" = "mail", afterMs?: number, defaultTimeoutMs?: number): TaskSnapshot | undefined {
 		const task = this.tasks.get(id);
 		if (!task || task.done || !task.snap.attached) return undefined;
 		task.snap.attached = false;
+		if (!task.snap.timeoutMs && defaultTimeoutMs && defaultTimeoutMs > 0) this.deadline(task, defaultTimeoutMs);
 		void writeCtl(task.snap.logPath, { state: "detached", id, reason, ...(afterMs !== undefined ? { afterMs } : {}) });
 		this.changed();
 		return { ...task.snap };
